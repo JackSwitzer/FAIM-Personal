@@ -33,12 +33,15 @@ class DataProcessor:
         logging.info("Data types optimized to reduce memory usage.")
 
     def _optimize_data_types(self):
-        """Optimize data types to reduce memory usage."""
-        # Downcast numeric columns
-        for col in self.stock_data.select_dtypes(include=['float64']).columns:
-            self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='float')
-        for col in self.stock_data.select_dtypes(include=['int64']).columns:
-            self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='integer')
+      """Optimize data types to reduce memory usage."""
+      # Convert 'permno' to int64
+      self.stock_data['permno'] = pd.to_numeric(self.stock_data['permno'], downcast='integer').astype(np.int64)
+      # Downcast other numeric columns
+      for col in self.stock_data.select_dtypes(include=['float64']).columns:
+          self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='float')
+      for col in self.stock_data.select_dtypes(include=['int64']).columns:
+          if col != 'permno':  # 'permno' is already handled
+              self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='integer')
 
     def preprocess_data(self):
         """Preprocess the data: handle missing values, select features, and standardize if needed."""

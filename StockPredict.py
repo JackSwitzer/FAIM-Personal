@@ -110,9 +110,17 @@ def main():
             lstm_trainer.target_col: targets
         })
 
-        # Convert 'date' to datetime if necessary
+        # Ensure 'permno' columns are of the same dtype (int64)
+        data_processor.test_data['permno'] = data_processor.test_data['permno'].astype(np.int64)
+        predictions_df['permno'] = predictions_df['permno'].astype(np.int64)
+
+        # Convert 'date' columns to datetime64[ns]
         data_processor.test_data['date'] = pd.to_datetime(data_processor.test_data['date'])
         predictions_df['date'] = pd.to_datetime(predictions_df['date'])
+
+        # Debug: Check data types before merge
+        logging.info(f"Data types in data_processor.test_data:\n{data_processor.test_data[['permno', 'date']].dtypes}")
+        logging.info(f"Data types in predictions_df:\n{predictions_df[['permno', 'date']].dtypes}")
 
         # Merge predictions with test data on 'permno' and 'date'
         reg_pred_lstm = data_processor.test_data.merge(predictions_df, on=['permno', 'date'], how='inner')
