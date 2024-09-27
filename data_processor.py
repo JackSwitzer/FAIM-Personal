@@ -9,8 +9,9 @@ class DataProcessor:
     A class to handle data loading, preprocessing, transformation, and splitting.
     """
     def __init__(self, data_in_path, ret_var='stock_exret', standardize=True):
-        self.data_in_path = data_in_path
         self.ret_var = ret_var
+        logging.info(f"Target variable (ret_var) set to: {self.ret_var}")
+        self.data_in_path = data_in_path
         self.standardize = standardize
         self.scaler = None
         self.feature_cols = None
@@ -62,6 +63,10 @@ class DataProcessor:
             logging.info("Data standardized.")
             # Cast to float32
             self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
+
+        logging.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
+        if self.ret_var not in self.stock_data.columns:
+            logging.error(f"Target column '{self.ret_var}' not found in the data.")
 
     def split_data(self, train_pct=None, val_pct=None, test_pct=None):
         """Split data into training, validation, and test sets."""

@@ -21,6 +21,7 @@ class LSTMTrainer:
     def __init__(self, feature_cols, target_col, device, out_dir="./Data Output/"):
         self.feature_cols = feature_cols
         self.target_col = target_col
+        logging.info(f"Target column set to: {self.target_col}")
         self.device = device
         self.out_dir = out_dir
         self.best_hyperparams = None  # To store the best hyperparameters
@@ -30,6 +31,10 @@ class LSTMTrainer:
         """
         Create sequences of data for LSTM input.
         """
+        logging.info(f"Columns used for sequence creation: {data.columns.tolist()}")
+        if self.target_col not in data.columns:
+            logging.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
+        
         sequences = []
         targets = []
         indices = []

@@ -122,21 +122,25 @@ def main():
         logging.info(f"Data types in data_processor.test_data:\n{data_processor.test_data[['permno', 'date']].dtypes}")
         logging.info(f"Data types in predictions_df:\n{predictions_df[['permno', 'date']].dtypes}")
 
-        # Merge predictions with test data on 'permno' and 'date'
+        # Before merging
+        logging.info(f"Shape of test_data before merge: {data_processor.test_data.shape}")
+        logging.info(f"Shape of predictions_df before merge: {predictions_df.shape}")
+
+        # Merge predictions with test data
         reg_pred_lstm = data_processor.test_data.merge(predictions_df, on=['permno', 'date'], how='inner')
 
-        # Debug information
-        logging.info(f"Columns in reg_pred_lstm: {reg_pred_lstm.columns.tolist()}")
-        logging.info(f"Shape of reg_pred_lstm: {reg_pred_lstm.shape}")
+        # After merging
+        logging.info(f"Shape of reg_pred_lstm after merge: {reg_pred_lstm.shape}")
+        logging.info(f"Columns in reg_pred_lstm after merge: {reg_pred_lstm.columns.tolist()}")
 
-        # Ensure the target column exists in reg_pred_lstm
+        # Check if the target column exists
         if lstm_trainer.target_col not in reg_pred_lstm.columns:
             logging.error(f"Column '{lstm_trainer.target_col}' not found in the merged DataFrame.")
             logging.info(f"Available columns: {reg_pred_lstm.columns.tolist()}")
             return  # Exit the function if the column is not present
 
-        # Evaluate and Save Results
-        if not reg_pred_lstm.empty:
+        # Proceed with evaluation only if the target column exists
+        if lstm_trainer.target_col in reg_pred_lstm.columns:
             yreal = reg_pred_lstm[lstm_trainer.target_col]
             ypred = reg_pred_lstm['lstm_prediction']
             r2_lstm = calculate_oos_r2(yreal.values, ypred.values)
