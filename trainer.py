@@ -97,7 +97,7 @@ class LSTMTrainer:
         clip_grad_norm = hyperparams['clip_grad_norm']
         fc1_size = hyperparams['fc1_size']
         fc2_size = hyperparams['fc2_size']
-        num_epochs = hyperparams.get('num_epochs', 10)
+        num_epochs = hyperparams.get('num_epochs', 10000)
 
         # Initialize model
         input_size = len(self.feature_cols)
