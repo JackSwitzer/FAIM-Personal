@@ -98,8 +98,8 @@ class LSTMModel(nn.Module):
     Includes optimizations for efficient training on large datasets.
     """
     def __init__(
-        self, input_size, hidden_size=128, num_layers=2, dropout_rate=0.0,
-        bidirectional=False, use_batch_norm=False, activation_function=None,
+        self, input_size, hidden_size=128, num_layers=2, dropout_rate=0.2,
+        bidirectional=False, use_batch_norm=True, activation_function='LeakyReLU',
         fc1_size=64, fc2_size=32
     ):
         super(LSTMModel, self).__init__()
@@ -124,16 +124,16 @@ class LSTMModel(nn.Module):
         self.fc3 = nn.Linear(fc2_size, 1)
 
         # Activation and Dropout Layers
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(p=dropout_rate)
-
-        # Optional Activation Function
         if activation_function == 'ReLU':
             self.activation = nn.ReLU()
-        elif activation_function == 'Tanh':
-            self.activation = nn.Tanh()
+        elif activation_function == 'LeakyReLU':
+            self.activation = nn.LeakyReLU()
+        elif activation_function == 'ELU':
+            self.activation = nn.ELU()
         else:
-            self.activation = None
+            self.activation = nn.ReLU()  # Default to ReLU
+        
+        self.dropout = nn.Dropout(p=dropout_rate)
 
     def forward(self, x):
         # LSTM forward pass
@@ -146,18 +146,14 @@ class LSTMModel(nn.Module):
 
         # Fully Connected Layers with Activation and Dropout
         out = self.fc1(out)
-        out = self.relu(out)
+        out = self.activation(out)
         out = self.dropout(out)
 
         out = self.fc2(out)
-        out = self.relu(out)
+        out = self.activation(out)
         out = self.dropout(out)
 
         out = self.fc3(out)
-
-        # Apply optional activation function
-        if self.activation:
-            out = self.activation(out)
 
         return out
 
