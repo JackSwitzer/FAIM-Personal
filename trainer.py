@@ -352,7 +352,7 @@ class LSTMTrainer:
     def load_checkpoint(self, model, optimizer, scheduler=None, filename='best_checkpoint.pth'):
         checkpoint_path = os.path.join(self.out_dir, filename)
         if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
             model.load_state_dict(checkpoint['model_state_dict'])
 
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -366,7 +366,7 @@ class LSTMTrainer:
             # Check for interrupted checkpoint
             interrupted_checkpoint_path = os.path.join(self.out_dir, 'interrupted_checkpoint.pth')
             if os.path.exists(interrupted_checkpoint_path):
-                checkpoint = torch.load(interrupted_checkpoint_path, map_location=self.device)
+                checkpoint = torch.load(interrupted_checkpoint_path, map_location=self.device, weights_only=True)
                 model.load_state_dict(checkpoint['model_state_dict'])
 
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
