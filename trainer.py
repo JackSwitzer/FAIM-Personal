@@ -38,6 +38,7 @@ class LSTMTrainer:
         self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
         if self.target_col not in data.columns:
             self.logger.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
+            return None, None, None  # Return early if target column is missing
         
         sequences = []
         targets = []
@@ -45,24 +46,26 @@ class LSTMTrainer:
         data = data.sort_values(['permno', 'date'])
         grouped = data.groupby('permno')
 
-        for _, group in grouped:
-            if len(group) < seq_length + 1:
+        for permno, group in grouped:
+            group_length = len(group)
+            if group_length < seq_length:
+                self.logger.debug(f"Skipping 'permno' {permno} due to insufficient data. Group size: {group_length}")
                 continue
             group_X = group[self.feature_cols].values
             group_Y = group[self.target_col].values
             group_indices = group.index.values
-            for i in range(len(group_X) - seq_length):
+            for i in range(group_length - seq_length + 1):
                 seq = group_X[i:i+seq_length]
-                target = group_Y[i+seq_length]
-                target_index = group_indices[i+seq_length]
+                target = group_Y[i+seq_length-1]
+                target_index = group_indices[i+seq_length-1]
                 sequences.append(seq)
                 targets.append(target)
                 indices.append(target_index)
-        
+
         if not sequences:
             self.logger.warning("No valid sequences created.")
             return None, None, None
-        
+
         return np.array(sequences), np.array(targets), np.array(indices)
 
     def parallel_create_sequences(self, data, seq_length, num_processes=None):
@@ -70,7 +73,7 @@ class LSTMTrainer:
         Create sequences in parallel using multiprocessing.
         """
         if num_processes is None:
-            num_processes = multiprocessing.cpu_count()
+            num_processes = max(1, multiprocessing.cpu_count() - 1)
 
         # Split the data into chunks for each process
         data_chunks = np.array_split(data, num_processes)
@@ -83,14 +86,15 @@ class LSTMTrainer:
             results = pool.map(partial_create_sequences, data_chunks)
 
         # Combine the results, handling empty results
-        sequences = [r[0] for r in results if r[0] is not None and r[0].size > 0]
-        targets = [r[1] for r in results if r[1] is not None and r[1].size > 0]
-        indices = [r[2] for r in results if r[2] is not None and r[2].size > 0]
+        sequences = [r[0] for r in results if r[0] is not None and len(r[0]) > 0]
+        targets = [r[1] for r in results if r[1] is not None and len(r[1]) > 0]
+        indices = [r[2] for r in results if r[2] is not None and len(r[2]) > 0]
 
         if not sequences or not targets or not indices:
-            self.logger.warning("No valid sequences created.")
+            self.logger.warning("No valid sequences created in parallel execution.")
             return None, None, None
 
+        self.logger.info(f"Sequences created in parallel. Total sequences: {sum(len(s) for s in sequences)}")
         return np.concatenate(sequences), np.concatenate(targets), np.concatenate(indices)
 
     def _create_dataloader(self, X, Y, batch_size, shuffle=False):

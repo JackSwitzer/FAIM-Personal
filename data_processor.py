@@ -83,21 +83,46 @@ class DataProcessor:
         self.train_data.reset_index(drop=True, inplace=True)
         self.val_data.reset_index(drop=True, inplace=True)
         self.test_data.reset_index(drop=True, inplace=True)
-        self.logger.info("Data split into training, validation, and test sets.")
+        # Add logging to verify data splits
+        self.logger.info(f"Data split completed.")
+        self.logger.info(f"Train data size: {len(self.train_data)}, Validation data size: {len(self.val_data)}, Test data size: {len(self.test_data)}")
+        self.logger.info(f"Number of unique 'permno' in train data: {self.train_data['permno'].nunique()}")
+        self.logger.info(f"Number of unique 'permno' in validation data: {self.val_data['permno'].nunique()}")
+        self.logger.info(f"Number of unique 'permno' in test data: {self.test_data['permno'].nunique()}")
 
     def _time_based_split(self):
         """Split data based on predefined time periods."""
         data = self.stock_data.copy()
         data.sort_values('date', inplace=True)
 
-        # Define split dates
-        train_end_date = datetime.datetime(2021, 12, 31)
-        val_end_date = datetime.datetime(2022, 12, 31)
+        # Get the minimum and maximum dates
+        min_date = data['date'].min()
+        max_date = data['date'].max()
+        self.logger.info(f"Data date range: {min_date} to {max_date}")
+
+        # Calculate the total time span
+        total_span = (max_date - min_date).days
+
+        # Define the split ratios
+        train_ratio = 0.8
+        val_ratio = 0.1
+        test_ratio = 0.1
+
+        # Calculate split dates
+        train_days = int(total_span * train_ratio)
+        val_days = int(total_span * val_ratio)
+
+        train_end_date = min_date + pd.Timedelta(days=train_days)
+        val_end_date = train_end_date + pd.Timedelta(days=val_days)
+
+        self.logger.info(f"Train date range: {min_date.date()} to {train_end_date.date()}")
+        self.logger.info(f"Validation date range: {train_end_date.date()} to {val_end_date.date()}")
+        self.logger.info(f"Test date range: {val_end_date.date()} to {max_date.date()}")
 
         # Split the data
-        train_data = data[data['date'] <= train_end_date]
-        val_data = data[(data['date'] > train_end_date) & (data['date'] <= val_end_date)]
-        test_data = data[data['date'] > val_end_date]
+        train_data = data[data['date'] < train_end_date]
+        val_data = data[(data['date'] >= train_end_date) & (data['date'] < val_end_date)]
+        test_data = data[data['date'] >= val_end_date]
 
         return train_data, val_data, test_data
 
