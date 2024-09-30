@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 
 import pandas as pd
 import optuna
+from tqdm import tqdm
 
 from models import LSTMModel, StockDataset
 from utils import get_logger
@@ -80,9 +81,9 @@ class LSTMTrainer:
             results = pool.map(partial_create_sequences, data_chunks)
 
         # Combine the results
-        sequences = np.concatenate([r[0] for r in results])
-        targets = np.concatenate([r[1] for r in results])
-        indices = np.concatenate([r[2] for r in results])
+        sequences = np.concatenate([r[0] for r in results if r[0].size > 0])
+        targets = np.concatenate([r[1] for r in results if r[1].size > 0])
+        indices = np.concatenate([r[2] for r in results if r[2].size > 0])
 
         return sequences, targets, indices
 
@@ -125,7 +126,7 @@ class LSTMTrainer:
         fc1_size = hyperparams['fc1_size']
         fc2_size = hyperparams['fc2_size']
         num_epochs = hyperparams.get('num_epochs', 10000)
-        accumulation_steps = hyperparams.get('accumulation_steps', 1)  # Add accumulation_steps
+        accumulation_steps = hyperparams.get('accumulation_steps', 1)
 
         # Initialize model
         input_size = len(self.feature_cols)
@@ -376,23 +377,27 @@ class LSTMTrainer:
     def load_checkpoint(self, model, optimizer, scheduler=None, filename='best_checkpoint.pth'):
         checkpoint_path = os.path.join(self.out_dir, filename)
         if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=self.device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if scheduler and checkpoint.get('scheduler_state_dict'):
-                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch'] + 1
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            hyperparams = checkpoint.get('hyperparams', {})
-            self.logger.info(f"Resuming from checkpoint at epoch {start_epoch - 1}")
-            return model, optimizer, scheduler, start_epoch, best_val_loss, hyperparams
-        else:
-            # Check for interrupted checkpoint
-            interrupted_checkpoint_path = os.path.join(self.out_dir, 'interrupted_checkpoint.pth')
-            if os.path.exists(interrupted_checkpoint_path):
-                return self.load_checkpoint(model, optimizer, scheduler, 'interrupted_checkpoint.pth')
-            else:
-                raise FileNotFoundError(f"No checkpoint found at {checkpoint_path} or {interrupted_checkpoint_path}")
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if scheduler and checkpoint.get('scheduler_state_dict'):
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                hyperparams = checkpoint.get('hyperparams', {})
+                self.logger.info(f"Resuming from checkpoint at epoch {start_epoch - 1}")
+                return model, optimizer, scheduler, start_epoch, best_val_loss, hyperparams
+            except Exception as e:
+                self.logger.error(f"Error loading checkpoint: {str(e)}")
+        
+        # Check for interrupted checkpoint
+        interrupted_checkpoint_path = os.path.join(self.out_dir, 'interrupted_checkpoint.pth')
+        if os.path.exists(interrupted_checkpoint_path):
+            return self.load_checkpoint(model, optimizer, scheduler, 'interrupted_checkpoint.pth')
+        
+        self.logger.info("No valid checkpoint found, starting from scratch.")
+        return model, optimizer, scheduler, 1, float('inf'), {}
 
     def save_training_metrics(self, train_losses, val_losses):
         metrics = {

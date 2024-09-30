@@ -59,6 +59,20 @@ def main():
 
         logger.info(f"Sequences created. Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
 
+        # Check if validation and test sequences are empty
+        if X_val.shape[0] == 0 or X_test.shape[0] == 0:
+            logger.error("Validation or test sequences are empty. Adjusting sequence length.")
+            # Adjust sequence length to ensure we have validation and test data
+            min_length = min(len(data_processor.val_data), len(data_processor.test_data))
+            best_hyperparams['seq_length'] = min(best_hyperparams['seq_length'], min_length - 1)
+            
+            # Recreate sequences with adjusted length
+            X_train, Y_train, _ = lstm_trainer.parallel_create_sequences(data_processor.train_data, best_hyperparams['seq_length'])
+            X_val, Y_val, _ = lstm_trainer.parallel_create_sequences(data_processor.val_data, best_hyperparams['seq_length'])
+            X_test, Y_test, test_indices = lstm_trainer.parallel_create_sequences(data_processor.test_data, best_hyperparams['seq_length'])
+            
+            logger.info(f"Sequences recreated. Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+
         log_memory_usage()
         log_gpu_memory()
 
@@ -68,7 +82,6 @@ def main():
 
         # Train the Final LSTM Model
         logger.info(f"Starting LSTM model training with hyperparameters: {best_hyperparams}")
-        train_loader = tqdm(train_loader, desc="Training")
         model, _ = lstm_trainer.train_model(train_loader, val_loader, best_hyperparams.copy())  # Use a copy to avoid modifying the original
         logger.info("LSTM model training completed.")
 
