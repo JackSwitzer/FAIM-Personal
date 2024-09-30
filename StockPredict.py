@@ -13,8 +13,6 @@ out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
 os.makedirs(out_dir, exist_ok=True)
 setup_logging(out_dir)
 
-
-
 set_seed()
 
 def main():
@@ -25,6 +23,10 @@ def main():
         data_input_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
         full_data_path = os.path.join(data_input_dir, "hackathon_sample_v2.csv")
 
+        # Allow for configurable target variable
+        target_variable = 'stock_exret'  # Change this to your desired target, e.g., 'stock_price'
+        logging.info(f"Target variable set to: {target_variable}")
+
         # Data processing
         data_processor = DataProcessor(full_data_path, standardize=True)
         data_processor.load_data()
@@ -34,7 +36,7 @@ def main():
         feature_cols = data_processor.feature_cols
 
         # Initialize LSTM Trainer
-        lstm_trainer = LSTMTrainer(feature_cols, 'stock_exret', device, out_dir=out_dir)
+        lstm_trainer = LSTMTrainer(feature_cols, target_variable, device, out_dir=out_dir)
 
         # Load best hyperparameters or optimize if not available
         if not lstm_trainer.load_best_hyperparams():
