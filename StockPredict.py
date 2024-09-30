@@ -1,31 +1,19 @@
 import os
 import logging
 import traceback
-import random
-import numpy as np
-
 import pandas as pd
 import torch.nn as nn
-import torch
 
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
 from utils import *
 
-# Parse arguments first
-args = parse_args()
-
 # Set up logging
-out_dir = args.out_dir
+out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
 os.makedirs(out_dir, exist_ok=True)
-setup_logging(os.path.join(out_dir, 'training.log'))
+setup_logging(out_dir)
 
-def set_seed(seed=42):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+
 
 set_seed()
 
@@ -34,8 +22,8 @@ def main():
         clear_gpu_memory()
         check_torch_version()
         device = check_cuda()
-        data_input_dir = args.data_input_dir
-        full_data_path = os.path.join(data_input_dir, args.data_file)
+        data_input_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
+        full_data_path = os.path.join(data_input_dir, "hackathon_sample_v2.csv")
 
         # Data processing
         data_processor = DataProcessor(full_data_path, standardize=True)
@@ -48,102 +36,46 @@ def main():
         # Initialize LSTM Trainer
         lstm_trainer = LSTMTrainer(feature_cols, 'stock_exret', device, out_dir=out_dir)
 
-        # Hyperparameter optimization
-        if args.optimize:
+        # Load best hyperparameters or optimize if not available
+        if not lstm_trainer.load_best_hyperparams():
             logging.info("Starting hyperparameter optimization...")
             best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
                 data_processor.train_data,
                 data_processor.val_data,
-                n_trials=args.n_trials
+                n_trials=50
             )
-            logging.info("Hyperparameter optimization completed.")
-        elif lstm_trainer.load_best_hyperparams():
-            best_hyperparams = lstm_trainer.best_hyperparams
-        else:
-            logging.error("No hyperparameters found. Please run optimization first.")
-            return
+            lstm_trainer.save_best_hyperparams()
+        
+        best_hyperparams = lstm_trainer.best_hyperparams
+        
+        # Create sequences and dataloaders
+        X_train, Y_train, _ = lstm_trainer.create_sequences(data_processor.train_data, best_hyperparams['seq_length'])
+        X_val, Y_val, _ = lstm_trainer.create_sequences(data_processor.val_data, best_hyperparams['seq_length'])
+        X_test, Y_test, test_indices = lstm_trainer.create_sequences(data_processor.test_data, best_hyperparams['seq_length'])
 
-        # Override hyperparameters based on command-line arguments
-        best_hyperparams['num_epochs'] = args.num_epochs
-        best_hyperparams['batch_size'] = args.batch_size
-        best_hyperparams['seq_length'] = args.seq_length
-
-        logging.info(f"Training for {best_hyperparams['num_epochs']} epochs")
-
-        # Combine Training and Validation Data for Final Training
-        combined_train_data = pd.concat([data_processor.train_data, data_processor.val_data])
-        combined_train_data.reset_index(drop=True, inplace=True)
-
-        # Create Sequences for Training and Testing
-        seq_length = best_hyperparams['seq_length']
-        X_train_combined, Y_train_combined, train_indices = lstm_trainer.create_sequences(combined_train_data, seq_length)
-        X_test_seq, Y_test_seq, test_indices = lstm_trainer.create_sequences(data_processor.test_data, seq_length)
-
-        # Create DataLoaders
-        batch_size = best_hyperparams['batch_size']
-        train_loader = lstm_trainer._create_dataloader(X_train_combined, Y_train_combined, batch_size, shuffle=True)
-        test_loader = lstm_trainer._create_dataloader(X_test_seq, Y_test_seq, batch_size, shuffle=False)
+        train_loader = lstm_trainer._create_dataloader(X_train, Y_train, best_hyperparams['batch_size'], shuffle=False)
+        val_loader = lstm_trainer._create_dataloader(X_val, Y_val, best_hyperparams['batch_size'], shuffle=False)
+        test_loader = lstm_trainer._create_dataloader(X_test, Y_test, best_hyperparams['batch_size'], shuffle=False)
 
         # Train the Final LSTM Model
-        model, _ = lstm_trainer.train_model(
-            train_loader,
-            None,  # No validation loader for final training
-            best_hyperparams
-        )
-        logging.info("Final model training completed.")
+        model, _ = lstm_trainer.train_model(train_loader, val_loader, best_hyperparams)
 
-        # Make Predictions on the Test Data
-        test_loss, predictions, targets = lstm_trainer._evaluate(
-            model,
-            test_loader,
-            nn.MSELoss(),
-            return_predictions=True
-        )
-        logging.info(f"Test loss: {test_loss:.4f}")
+        # Evaluate on test set
+        _, predictions, targets = lstm_trainer._evaluate(model, test_loader, nn.MSELoss(), return_predictions=True)
 
-        # Get permnos and dates using test_indices
-        test_data = data_processor.test_data  # Do not reset index here
-        permnos = test_data.iloc[test_indices]['permno'].values
-        dates = test_data.iloc[test_indices]['date'].values
-
-        # Prepare DataFrame with Predictions using permno and date
+        # Prepare DataFrame with Predictions
+        test_data = data_processor.test_data.iloc[test_indices]
         predictions_df = pd.DataFrame({
-            'permno': permnos,
-            'date': dates,
+            'permno': test_data['permno'].values,
+            'date': test_data['date'].values,
             'lstm_prediction': predictions,
             lstm_trainer.target_col: targets
         })
 
-        # Ensure 'permno' columns are of the same dtype (int64)
-        data_processor.test_data['permno'] = data_processor.test_data['permno'].astype(np.int64)
-        predictions_df['permno'] = predictions_df['permno'].astype(np.int64)
-
-        # Convert 'date' columns to datetime64[ns]
-        data_processor.test_data['date'] = pd.to_datetime(data_processor.test_data['date'])
-        predictions_df['date'] = pd.to_datetime(predictions_df['date'])
-
-        # Debug: Check data types before merge
-        logging.info(f"Data types in data_processor.test_data:\n{data_processor.test_data[['permno', 'date']].dtypes}")
-        logging.info(f"Data types in predictions_df:\n{predictions_df[['permno', 'date']].dtypes}")
-
-        # Before merging
-        logging.info(f"Shape of test_data before merge: {data_processor.test_data.shape}")
-        logging.info(f"Shape of predictions_df before merge: {predictions_df.shape}")
-
         # Merge predictions with test data
         reg_pred_lstm = data_processor.test_data.merge(predictions_df, on=['permno', 'date'], how='inner')
 
-        # After merging
-        logging.info(f"Shape of reg_pred_lstm after merge: {reg_pred_lstm.shape}")
-        logging.info(f"Columns in reg_pred_lstm after merge: {reg_pred_lstm.columns.tolist()}")
-
-        # Check if the target column exists
-        if lstm_trainer.target_col not in reg_pred_lstm.columns:
-            logging.error(f"Column '{lstm_trainer.target_col}' not found in the merged DataFrame.")
-            logging.info(f"Available columns: {reg_pred_lstm.columns.tolist()}")
-            return  # Exit the function if the column is not present
-
-        # Proceed with evaluation only if the target column exists
+        # Calculate OOS R-squared
         yreal = reg_pred_lstm[lstm_trainer.target_col]
         ypred = reg_pred_lstm['lstm_prediction']
         r2_lstm = calculate_oos_r2(yreal.values, ypred.values)
@@ -155,7 +87,6 @@ def main():
     except Exception as e:
         logging.error(f"An error occurred: {str(e)}")
         logging.error(traceback.format_exc())
-
 
 if __name__ == "__main__":
     main()
