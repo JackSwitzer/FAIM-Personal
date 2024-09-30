@@ -92,4 +92,13 @@ def check_torch_version():
     if version.parse(current_version) < version.parse(required_version):
         logging.warning(f"PyTorch version {current_version} is older than the recommended version {required_version}. Some features may not work as expected.")
 
-# Call this function periodically in your training loop
+def log_memory_usage():
+    import psutil
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    logging.info(f"Memory usage: {memory_info.rss / (1024 * 1024):.2f} MB")
+
+def log_gpu_memory():
+    if torch.cuda.is_available():
+        logging.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        logging.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
