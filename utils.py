@@ -1,14 +1,30 @@
 import os
+import random
 import numpy as np
 import torch
 import logging
 import gc
 import sys
 import importlib
-import argparse
 import pynvml
 from packaging import version
 from datetime import datetime
+
+def setup_logging(log_dir, level=logging.INFO):
+    """Set up logging configuration with a unique log file name."""
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"training_{timestamp}.log")
+    
+    logging.basicConfig(
+        level=level,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    logging.info(f"Logging initialized. Log file: {log_file}")
 
 def save_csv(df, output_dir, filename):
     """Save the DataFrame to a CSV file."""
@@ -39,44 +55,15 @@ def clear_import_cache():
             importlib.reload(sys.modules[module])
     logging.info("Python import cache cleared.")
 
-def setup_logging(log_dir, level=logging.INFO):
-    """Set up logging configuration with a unique log file name."""
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"training_{timestamp}.log")
-    
-    logging.basicConfig(
-        level=level,
-        format='[%(asctime)s] %(levelname)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    logging.info(f"Logging initialized. Log file: {log_file}")
-
 def check_cuda():
-    """Check for CUDA availability and return the appropriate device."""
+    """Check if CUDA is available and return the appropriate device."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
-        device = torch.device('cuda')
         logging.info(f"CUDA is available. GPU: {torch.cuda.get_device_name(0)}")
     else:
-        device = torch.device('cpu')
         logging.info("CUDA is not available. Using CPU.")
     logging.info(f"PyTorch version: {torch.__version__}")
     return device
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='Stock Prediction using LSTM')
-    parser.add_argument('--data_input_dir', type=str, default=r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input", help='Input data directory')
-    parser.add_argument('--out_dir', type=str, default=r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output", help='Output directory')
-    parser.add_argument('--data_file', type=str, default="hackathon_sample_v2.csv", help='Data file name')
-    parser.add_argument('--optimize', action='store_true', help='Whether to perform hyperparameter optimization')
-    parser.add_argument('--n_trials', type=int, default=50, help='Number of trials for hyperparameter optimization')
-    parser.add_argument('--num_epochs', type=int, default=50, help='Number of epochs for training')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--seq_length', type=int, default=10, help='Sequence length for LSTM')
-    return parser.parse_args()
 
 def log_gpu_memory_usage():
     try:
@@ -108,3 +95,10 @@ def log_gpu_memory():
     if torch.cuda.is_available():
         logging.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         logging.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
