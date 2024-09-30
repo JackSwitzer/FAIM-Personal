@@ -98,6 +98,7 @@ class LSTMTrainer:
         fc1_size = hyperparams['fc1_size']
         fc2_size = hyperparams['fc2_size']
         num_epochs = hyperparams.get('num_epochs', 10000)
+        accumulation_steps = hyperparams.get('accumulation_steps', 1)  # Add accumulation_steps
 
         # Initialize model
         input_size = len(self.feature_cols)
@@ -146,9 +147,32 @@ class LSTMTrainer:
             logging.info(f"No checkpoint found, starting from scratch. {str(e)}")
             start_epoch = 1
 
+        # Gradient accumulation setup
+        if accumulation_steps < 1:
+            accumulation_steps = 1
+        logging.info(f"Using gradient accumulation with {accumulation_steps} steps")
+        
         for epoch in range(start_epoch, num_epochs + 1):
             start_time = datetime.datetime.now()
-            train_loss = self._train_epoch(model, train_loader, criterion, optimizer, clip_grad_norm)
+            model.train()
+            optimizer.zero_grad()
+            running_loss = 0.0
+            for batch_idx, (batch_X, batch_Y) in enumerate(train_loader):
+                batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+                outputs = model(batch_X).squeeze(-1)
+                loss = criterion(outputs, batch_Y)
+                loss = loss / accumulation_steps
+                loss.backward()
+                running_loss += loss.item()
+
+                if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+                    if clip_grad_norm:
+                        nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+            # Calculate average training loss
+            train_loss = running_loss * accumulation_steps / len(train_loader)
             epoch_duration = datetime.datetime.now() - start_time
             logging.info(f"Epoch {epoch}/{num_epochs}, Train Loss: {train_loss:.4f}, Duration: {epoch_duration}")
             train_losses.append(train_loss)
@@ -235,6 +259,7 @@ class LSTMTrainer:
             clip_grad_norm = trial.suggest_float('clip_grad_norm', 0.5, 4.0)
             fc1_size = trial.suggest_categorical('fc1_size', [32, 64, 128])
             fc2_size = trial.suggest_categorical('fc2_size', [16, 32, 64])
+            accumulation_steps = trial.suggest_int('accumulation_steps', 1, 4)
             num_epochs = 10  # For hyperparameter optimization, keep epochs small
 
             hyperparams = {
@@ -253,7 +278,8 @@ class LSTMTrainer:
                 'fc2_size': fc2_size,
                 'num_epochs': num_epochs,
                 'seq_length': seq_length,
-                'batch_size': batch_size
+                'batch_size': batch_size,
+                'accumulation_steps': accumulation_steps
             }
 
             # Create sequences and dataloaders

@@ -157,3 +157,6 @@ class LSTMModel(nn.Module):
             out = self.activation(out)
 
         return out
+
+    def to_device(self, device):
+        return self.to(device)

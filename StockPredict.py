@@ -6,11 +6,19 @@ import numpy as np
 
 import pandas as pd
 import torch.nn as nn
+import torch
 
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
 from utils import *
 
+# Parse arguments first
+args = parse_args()
+
+# Set up logging
+out_dir = args.out_dir
+os.makedirs(out_dir, exist_ok=True)
+setup_logging(os.path.join(out_dir, 'training.log'))
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -23,14 +31,10 @@ set_seed()
 
 def main():
     try:
-        check_torch_version()
-        args = parse_args()
         clear_gpu_memory()
+        check_torch_version()
         device = check_cuda()
         data_input_dir = args.data_input_dir
-        out_dir = args.out_dir
-        os.makedirs(out_dir, exist_ok=True)
-        setup_logging(os.path.join(out_dir, 'training.log'))
         full_data_path = os.path.join(data_input_dir, args.data_file)
 
         # Data processing
@@ -98,9 +102,9 @@ def main():
         logging.info(f"Test loss: {test_loss:.4f}")
 
         # Get permnos and dates using test_indices
-        test_data = data_processor.test_data.reset_index()
-        permnos = test_data.loc[test_indices, 'permno'].values
-        dates = test_data.loc[test_indices, 'date'].values
+        test_data = data_processor.test_data  # Do not reset index here
+        permnos = test_data.iloc[test_indices]['permno'].values
+        dates = test_data.iloc[test_indices]['date'].values
 
         # Prepare DataFrame with Predictions using permno and date
         predictions_df = pd.DataFrame({
@@ -140,24 +144,18 @@ def main():
             return  # Exit the function if the column is not present
 
         # Proceed with evaluation only if the target column exists
-        if lstm_trainer.target_col in reg_pred_lstm.columns:
-            yreal = reg_pred_lstm[lstm_trainer.target_col]
-            ypred = reg_pred_lstm['lstm_prediction']
-            r2_lstm = calculate_oos_r2(yreal.values, ypred.values)
-            logging.info(f'LSTM OOS R2: {r2_lstm:.4f}')
+        yreal = reg_pred_lstm[lstm_trainer.target_col]
+        ypred = reg_pred_lstm['lstm_prediction']
+        r2_lstm = calculate_oos_r2(yreal.values, ypred.values)
+        logging.info(f'LSTM OOS R2: {r2_lstm:.4f}')
 
-            # Save LSTM predictions
-            save_csv(reg_pred_lstm, out_dir, 'lstm_predictions.csv')
-        else:
-            logging.info("No predictions were made due to insufficient test data.")
+        # Save LSTM predictions
+        save_csv(reg_pred_lstm, out_dir, 'lstm_predictions.csv')
 
     except Exception as e:
         logging.error(f"An error occurred: {str(e)}")
         logging.error(traceback.format_exc())
-        # Optionally, you can send an email or notification here
-    finally:
-        # Clean up resources, if any
-        clear_gpu_memory()
+
 
 if __name__ == "__main__":
     main()

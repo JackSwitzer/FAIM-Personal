@@ -3,6 +3,7 @@ import numpy as np
 import datetime
 import logging
 from sklearn.preprocessing import StandardScaler
+from multiprocessing import Pool
 
 class DataProcessor:
     """
@@ -124,3 +125,13 @@ class DataProcessor:
         Y_test = self.test_data[self.ret_var].values.astype('float32')
 
         return X_train, Y_train, X_val, Y_val, X_test, Y_test
+
+    def parallel_create_sequences(self, data, seq_length, num_processes=4):
+        with Pool(num_processes) as pool:
+            chunks = np.array_split(data, num_processes)
+            results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
+        
+        sequences = np.concatenate([r[0] for r in results])
+        targets = np.concatenate([r[1] for r in results])
+        indices = np.concatenate([r[2] for r in results])
+        return sequences, targets, indices
