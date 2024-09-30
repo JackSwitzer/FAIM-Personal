@@ -8,6 +8,7 @@ import importlib
 import argparse
 import pynvml
 from packaging import version
+from datetime import datetime
 
 def save_csv(df, output_dir, filename):
     """Save the DataFrame to a CSV file."""
@@ -38,8 +39,12 @@ def clear_import_cache():
             importlib.reload(sys.modules[module])
     logging.info("Python import cache cleared.")
 
-def setup_logging(log_file, level=logging.INFO):
-    """Set up logging configuration."""
+def setup_logging(log_dir, level=logging.INFO):
+    """Set up logging configuration with a unique log file name."""
+    os.makedirs(log_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"training_{timestamp}.log")
+    
     logging.basicConfig(
         level=level,
         format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -48,6 +53,7 @@ def setup_logging(log_file, level=logging.INFO):
             logging.StreamHandler()
         ]
     )
+    logging.info(f"Logging initialized. Log file: {log_file}")
 
 def check_cuda():
     """Check for CUDA availability and return the appropriate device."""
