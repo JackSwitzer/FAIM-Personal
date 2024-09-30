@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import datetime
 from sklearn.preprocessing import StandardScaler
 from multiprocessing import Pool
 
@@ -13,7 +12,6 @@ class DataProcessor:
     def __init__(self, data_in_path, ret_var='stock_exret', standardize=True):
         self.logger = get_logger()
         self.ret_var = ret_var
-        self.logger.info(f"Target variable (ret_var) set to: {self.ret_var}")
         self.data_in_path = data_in_path
         self.standardize = standardize
         self.scaler = None
