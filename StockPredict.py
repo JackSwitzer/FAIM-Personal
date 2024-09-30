@@ -2,7 +2,6 @@ import os
 import traceback
 import pandas as pd
 import torch.nn as nn
-from tqdm import tqdm
 
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
@@ -57,10 +56,10 @@ def main():
         X_val, Y_val, _ = lstm_trainer.parallel_create_sequences(data_processor.val_data, best_hyperparams['seq_length'])
         X_test, Y_test, test_indices = lstm_trainer.parallel_create_sequences(data_processor.test_data, best_hyperparams['seq_length'])
 
-        logger.info(f"Sequences created. Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+        logger.info(f"Sequences created. Train: {X_train.shape if X_train is not None else 'Empty'}, Val: {X_val.shape if X_val is not None else 'Empty'}, Test: {X_test.shape if X_test is not None else 'Empty'}")
 
         # Check if validation and test sequences are empty
-        if X_val.shape[0] == 0 or X_test.shape[0] == 0:
+        if X_val is None or X_test is None:
             logger.error("Validation or test sequences are empty. Adjusting sequence length.")
             # Adjust sequence length to ensure we have validation and test data
             min_length = min(len(data_processor.val_data), len(data_processor.test_data))
@@ -71,7 +70,12 @@ def main():
             X_val, Y_val, _ = lstm_trainer.parallel_create_sequences(data_processor.val_data, best_hyperparams['seq_length'])
             X_test, Y_test, test_indices = lstm_trainer.parallel_create_sequences(data_processor.test_data, best_hyperparams['seq_length'])
             
-            logger.info(f"Sequences recreated. Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+            logger.info(f"Sequences recreated. Train: {X_train.shape if X_train is not None else 'Empty'}, Val: {X_val.shape if X_val is not None else 'Empty'}, Test: {X_test.shape if X_test is not None else 'Empty'}")
+
+        # Check if we have valid sequences before proceeding
+        if X_train is None or X_val is None or X_test is None:
+            logger.error("Unable to create valid sequences for all datasets. Exiting.")
+            return
 
         log_memory_usage()
         log_gpu_memory()

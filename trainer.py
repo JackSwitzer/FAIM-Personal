@@ -58,10 +58,12 @@ class LSTMTrainer:
                 sequences.append(seq)
                 targets.append(target)
                 indices.append(target_index)
-        sequences = np.array(sequences)
-        targets = np.array(targets)
-        indices = np.array(indices)
-        return sequences, targets, indices
+        
+        if not sequences:
+            self.logger.warning("No valid sequences created.")
+            return None, None, None
+        
+        return np.array(sequences), np.array(targets), np.array(indices)
 
     def parallel_create_sequences(self, data, seq_length, num_processes=None):
         """
@@ -80,12 +82,16 @@ class LSTMTrainer:
         with multiprocessing.Pool(processes=num_processes) as pool:
             results = pool.map(partial_create_sequences, data_chunks)
 
-        # Combine the results
-        sequences = np.concatenate([r[0] for r in results if r[0].size > 0])
-        targets = np.concatenate([r[1] for r in results if r[1].size > 0])
-        indices = np.concatenate([r[2] for r in results if r[2].size > 0])
+        # Combine the results, handling empty results
+        sequences = [r[0] for r in results if r[0] is not None and r[0].size > 0]
+        targets = [r[1] for r in results if r[1] is not None and r[1].size > 0]
+        indices = [r[2] for r in results if r[2] is not None and r[2].size > 0]
 
-        return sequences, targets, indices
+        if not sequences or not targets or not indices:
+            self.logger.warning("No valid sequences created.")
+            return None, None, None
+
+        return np.concatenate(sequences), np.concatenate(targets), np.concatenate(indices)
 
     def _create_dataloader(self, X, Y, batch_size, shuffle=False):
         """Create DataLoader from sequences and targets."""
