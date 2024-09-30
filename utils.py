@@ -10,40 +10,54 @@ import pynvml
 from packaging import version
 from datetime import datetime
 
+# Create a global logger
+logger = logging.getLogger('stock_predictor')
+logger.setLevel(logging.INFO)
+
 def setup_logging(out_dir, level=logging.INFO):
-    """Set up logging configuration with a unique log file name in a subdirectory."""
-    log_dir = os.path.join(out_dir, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"training_{timestamp}.log")
-    
-    # Remove all existing handlers
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
-    
-    logging.basicConfig(
-        level=level,
-        format='[%(asctime)s] %(levelname)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    logging.info(f"Logging initialized. Log file: {log_file}")
+    """Set up logging configuration with a unique log file name."""
+    if not logger.handlers:
+        # Create log directory
+        log_dir = os.path.join(out_dir, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Use system time at the start of the run
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(log_dir, f"training_{timestamp}.log")
+
+        # File handler
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
+
+        # Stream handler
+        ch = logging.StreamHandler()
+        ch.setLevel(level)
+        ch.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
+
+        # Add handlers to the logger
+        logger.addHandler(fh)
+        logger.addHandler(ch)
+
+        logger.info(f"Logging initialized. Log file: {log_file}")
+
+def get_logger():
+    """Retrieve the global logger instance."""
+    return logger
 
 def save_csv(df, output_dir, filename):
     """Save the DataFrame to a CSV file."""
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, filename)
     df.to_csv(output_path, index=False)
-    logging.info(f"Data saved to: {output_path}")
+    logger.info(f"Data saved to: {output_path}")
 
 def calculate_oos_r2(y_true, y_pred):
     """Calculate Out-of-Sample R-squared."""
     numerator = np.sum((y_true - y_pred) ** 2)
     denominator = np.sum(y_true ** 2)
     if denominator == 0:
-        logging.warning("Denominator in OOS R^2 calculation is zero. Returning NaN.")
+        logger.warning("Denominator in OOS R^2 calculation is zero. Returning NaN.")
         return np.nan
     r2 = 1 - numerator / denominator
     return r2
@@ -58,16 +72,16 @@ def clear_import_cache():
     for module in list(sys.modules.keys()):
         if module not in sys.builtin_module_names:
             importlib.reload(sys.modules[module])
-    logging.info("Python import cache cleared.")
+    logger.info("Python import cache cleared.")
 
 def check_cuda():
     """Check if CUDA is available and return the appropriate device."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
-        logging.info(f"CUDA is available. GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"CUDA is available. GPU: {torch.cuda.get_device_name(0)}")
     else:
-        logging.info("CUDA is not available. Using CPU.")
-    logging.info(f"PyTorch version: {torch.__version__}")
+        logger.info("CUDA is not available. Using CPU.")
+    logger.info(f"PyTorch version: {torch.__version__}")
     return device
 
 def log_gpu_memory_usage():
@@ -75,9 +89,9 @@ def log_gpu_memory_usage():
         pynvml.nvmlInit()
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        logging.info(f"GPU memory: used={info.used/1024**2:.1f}MB, free={info.free/1024**2:.1f}MB, total={info.total/1024**2:.1f}MB")
+        logger.info(f"GPU memory: used={info.used/1024**2:.1f}MB, free={info.free/1024**2:.1f}MB, total={info.total/1024**2:.1f}MB")
     except:
-        logging.warning("Unable to log GPU memory usage")
+        logger.warning("Unable to log GPU memory usage")
     finally:
         try:
             pynvml.nvmlShutdown()
@@ -88,18 +102,18 @@ def check_torch_version():
     required_version = "1.7.0"  # Adjust this to the minimum required version
     current_version = torch.__version__
     if version.parse(current_version) < version.parse(required_version):
-        logging.warning(f"PyTorch version {current_version} is older than the recommended version {required_version}. Some features may not work as expected.")
+        logger.warning(f"PyTorch version {current_version} is older than the recommended version {required_version}. Some features may not work as expected.")
 
 def log_memory_usage():
     import psutil
     process = psutil.Process()
     memory_info = process.memory_info()
-    logging.info(f"Memory usage: {memory_info.rss / (1024 * 1024):.2f} MB")
+    logger.info(f"Memory usage: {memory_info.rss / (1024 * 1024):.2f} MB")
 
 def log_gpu_memory():
     if torch.cuda.is_available():
-        logging.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-        logging.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+        logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
 
 def set_seed(seed=42):
     random.seed(seed)
