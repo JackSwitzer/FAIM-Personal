@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 import sys
 import os
 import traceback
+import datetime
 
 # Add the parent directory to the Python path to import the modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -114,6 +115,99 @@ class TestLSTMModel(unittest.TestCase):
             print(f"Error in test_forward_pass: {str(e)}")
             print(traceback.format_exc())
             raise
+
+class TestDataSplittingAndSequenceCreation(unittest.TestCase):
+    def setUp(self):
+        # Create a synthetic dataset with controlled date ranges
+        dates = pd.date_range(start='2021-01-01', periods=365, freq='D')
+        permnos = [10001, 10002, 10003]
+        data = []
+        for permno in permnos:
+            for date in dates:
+                data.append({
+                    'permno': permno,
+                    'date': date,
+                    'feature1': np.random.randn(),
+                    'feature2': np.random.randn(),
+                    'stock_exret': np.random.randn()
+                })
+        self.df = pd.DataFrame(data)
+        self.data_in_path = 'test_data.csv'
+        self.df.to_csv(self.data_in_path, index=False)
+
+    def test_data_splitting(self):
+        processor = DataProcessor(self.data_in_path, standardize=False)
+        processor.load_data()
+        processor.preprocess_data()
+        processor.split_data()
+        self.assertGreater(len(processor.train_data), 0)
+        self.assertGreater(len(processor.val_data), 0)
+        self.assertGreater(len(processor.test_data), 0)
+        self.assertTrue('stock_exret' in processor.train_data.columns)
+
+    def test_sequence_creation(self):
+        processor = DataProcessor(self.data_in_path, standardize=False)
+        processor.load_data()
+        processor.preprocess_data()
+        processor.split_data()
+        trainer = LSTMTrainer(processor.feature_cols, processor.ret_var, torch.device('cpu'))
+        seq_length = 5
+        X_train, Y_train, _ = trainer.create_sequences(processor.train_data, seq_length)
+        X_val, Y_val, _ = trainer.create_sequences(processor.val_data, seq_length)
+        X_test, Y_test, _ = trainer.create_sequences(processor.test_data, seq_length)
+        self.assertIsNotNone(X_train)
+        self.assertIsNotNone(X_val)
+        self.assertIsNotNone(X_test)
+        self.assertEqual(X_train.shape[1], seq_length)
+        self.assertEqual(X_val.shape[1], seq_length)
+        self.assertEqual(X_test.shape[1], seq_length)
+
+    def tearDown(self):
+        if os.path.exists(self.data_in_path):
+            os.remove(self.data_in_path)
+
+class TestDynamicDateSplitting(unittest.TestCase):
+    def setUp(self):
+        # Create a synthetic dataset spanning over 12 years
+        dates = pd.date_range(end=datetime.datetime.today(), periods=12*365, freq='D')
+        permnos = [10001, 10002, 10003]
+        data = []
+        for permno in permnos:
+            for date in dates:
+                data.append({
+                    'permno': permno,
+                    'date': date,
+                    'feature1': np.random.randn(),
+                    'feature2': np.random.randn(),
+                    'stock_exret': np.random.randn()
+                })
+        self.df = pd.DataFrame(data)
+        self.data_in_path = 'test_dynamic_data.csv'
+        self.df.to_csv(self.data_in_path, index=False)
+
+    def test_dynamic_time_based_split(self):
+        processor = DataProcessor(self.data_in_path, standardize=False)
+        processor.load_data()
+        processor.preprocess_data()
+        processor.split_data()
+        
+        # Check that datasets are not empty
+        self.assertGreater(len(processor.train_data), 0)
+        self.assertGreater(len(processor.val_data), 0)
+        self.assertGreater(len(processor.test_data), 0)
+
+        # Check date ranges
+        train_end_date = processor.train_data['date'].max()
+        val_start_date = processor.val_data['date'].min()
+        val_end_date = processor.val_data['date'].max()
+        test_start_date = processor.test_data['date'].min()
+
+        self.assertLessEqual(train_end_date, val_start_date)
+        self.assertLessEqual(val_end_date, test_start_date)
+        
+    def tearDown(self):
+        if os.path.exists(self.data_in_path):
+            os.remove(self.data_in_path)
 
 if __name__ == '__main__':
     unittest.main()
