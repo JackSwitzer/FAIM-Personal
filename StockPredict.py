@@ -37,16 +37,14 @@ def main():
         lstm_trainer = LSTMTrainer(feature_cols, target_variable, device, out_dir=out_dir)
 
         # Load best hyperparameters or optimize if not available
-        if not lstm_trainer.load_best_hyperparams():
+        best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
+        if best_hyperparams is None:
             logger.info("Starting hyperparameter optimization...")
             best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
                 data_processor.train_data,
                 data_processor.val_data,
                 n_trials=50
             )
-            lstm_trainer.save_best_hyperparams()
-        
-        best_hyperparams = lstm_trainer.best_hyperparams
         
         # Create sequences and dataloaders
         X_train, Y_train, _ = lstm_trainer.create_sequences(data_processor.train_data, best_hyperparams['seq_length'])
@@ -58,7 +56,7 @@ def main():
         test_loader = lstm_trainer._create_dataloader(X_test, Y_test, best_hyperparams['batch_size'], shuffle=False)
 
         # Train the Final LSTM Model
-        model, _ = lstm_trainer.train_model(train_loader, val_loader, best_hyperparams)
+        model, _ = lstm_trainer.train_model(train_loader, val_loader, best_hyperparams.copy())  # Use a copy to avoid modifying the original
 
         # Evaluate on test set
         _, predictions, targets = lstm_trainer._evaluate(model, test_loader, nn.MSELoss(), return_predictions=True)

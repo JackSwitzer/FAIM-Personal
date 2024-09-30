@@ -322,60 +322,49 @@ class LSTMTrainer:
         best_val_loss = study.best_value
 
         # Save the best hyperparameters
-        self.save_best_hyperparams()
+        self.save_hyperparams(self.best_hyperparams, is_best=True)
 
         return self.best_hyperparams, best_val_loss
 
-    def save_best_hyperparams(self):
-        """Save the best hyperparameters to a JSON file."""
-        if self.best_hyperparams is None:
-            self.logger.info("No hyperparameters to save.")
-            return
-
-        file_path = os.path.join(self.out_dir, "best_hyperparams.json")
-        with open(file_path, 'w') as f:
-            json.dump(self.best_hyperparams, f, indent=2)
-        self.logger.info(f"Best hyperparameters saved to: {file_path}")
-
-    def load_best_hyperparams(self):
-        """Load the best hyperparameters from a JSON file."""
-        file_path = os.path.join(self.out_dir, "best_hyperparams.json")
+    def load_hyperparams(self, is_best=True):
+        """Load hyperparameters from a JSON file."""
+        filename = "best_hyperparams.json" if is_best else "current_hyperparams.json"
+        file_path = os.path.join(self.out_dir, filename)
         if os.path.exists(file_path):
             with open(file_path, 'r') as f:
-                self.best_hyperparams = json.load(f)
-            self.logger.info(f"Loaded best hyperparameters from: {file_path}")
-            return True
+                hyperparams = json.load(f)
+            self.logger.info(f"Loaded hyperparameters from: {file_path}")
+            return hyperparams
         else:
             self.logger.info(f"No hyperparameter file found at: {file_path}")
-            return False
+            return None
+
+    def save_hyperparams(self, hyperparams, is_best=False):
+        """Save the hyperparameters to a JSON file."""
+        filename = "best_hyperparams.json" if is_best else "current_hyperparams.json"
+        file_path = os.path.join(self.out_dir, filename)
+        with open(file_path, 'w') as f:
+            json.dump(hyperparams, f, indent=2)
+        self.logger.info(f"Hyperparameters saved to: {file_path}")
 
     def load_checkpoint(self, model, optimizer, scheduler=None, filename='best_checkpoint.pth'):
         checkpoint_path = os.path.join(self.out_dir, filename)
         if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
             model.load_state_dict(checkpoint['model_state_dict'])
-
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if scheduler and checkpoint.get('scheduler_state_dict'):
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            self.logger.info(f"Resuming from checkpoint at epoch {start_epoch -1}")
-            return model, optimizer, scheduler, start_epoch, best_val_loss
+            hyperparams = checkpoint.get('hyperparams', {})
+            self.logger.info(f"Resuming from checkpoint at epoch {start_epoch - 1}")
+            return model, optimizer, scheduler, start_epoch, best_val_loss, hyperparams
         else:
             # Check for interrupted checkpoint
             interrupted_checkpoint_path = os.path.join(self.out_dir, 'interrupted_checkpoint.pth')
             if os.path.exists(interrupted_checkpoint_path):
-                checkpoint = torch.load(interrupted_checkpoint_path, map_location=self.device, weights_only=True)
-                model.load_state_dict(checkpoint['model_state_dict'])
-
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                if scheduler and checkpoint.get('scheduler_state_dict'):
-                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                start_epoch = checkpoint['epoch'] + 1
-                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-                self.logger.info(f"Resuming from interrupted checkpoint at epoch {start_epoch -1}")
-                return model, optimizer, scheduler, start_epoch, best_val_loss
+                return self.load_checkpoint(model, optimizer, scheduler, 'interrupted_checkpoint.pth')
             else:
                 raise FileNotFoundError(f"No checkpoint found at {checkpoint_path} or {interrupted_checkpoint_path}")
 
