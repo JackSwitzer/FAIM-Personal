@@ -2,6 +2,8 @@ import os
 import datetime
 import json
 import numpy as np
+import multiprocessing
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -58,6 +60,30 @@ class LSTMTrainer:
         sequences = np.array(sequences)
         targets = np.array(targets)
         indices = np.array(indices)
+        return sequences, targets, indices
+
+    def parallel_create_sequences(self, data, seq_length, num_processes=None):
+        """
+        Create sequences in parallel using multiprocessing.
+        """
+        if num_processes is None:
+            num_processes = multiprocessing.cpu_count()
+
+        # Split the data into chunks for each process
+        data_chunks = np.array_split(data, num_processes)
+
+        # Create a partial function with fixed seq_length
+        partial_create_sequences = partial(self.create_sequences, seq_length=seq_length)
+
+        # Use multiprocessing to create sequences in parallel
+        with multiprocessing.Pool(processes=num_processes) as pool:
+            results = pool.map(partial_create_sequences, data_chunks)
+
+        # Combine the results
+        sequences = np.concatenate([r[0] for r in results])
+        targets = np.concatenate([r[1] for r in results])
+        indices = np.concatenate([r[2] for r in results])
+
         return sequences, targets, indices
 
     def _create_dataloader(self, X, Y, batch_size, shuffle=False):
