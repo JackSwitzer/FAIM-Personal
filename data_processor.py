@@ -158,7 +158,13 @@ class DataProcessor:
             chunks = np.array_split(data, num_processes)
             results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
         
-        sequences = np.concatenate([r[0] for r in results])
-        targets = np.concatenate([r[1] for r in results])
-        indices = np.concatenate([r[2] for r in results])
+        # Update this line
+        sequences = np.concatenate([r[0] for r in results if r[0] is not None])
+        targets = np.concatenate([r[1] for r in results if r[1] is not None])
+        indices = np.concatenate([r[2] for r in results if r[2] is not None])
+        
+        # Use transpose() instead of swapaxes()
+        if sequences.ndim == 3:
+            sequences = sequences.transpose(0, 2, 1)
+        
         return sequences, targets, indices

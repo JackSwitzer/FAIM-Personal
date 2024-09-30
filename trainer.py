@@ -180,10 +180,17 @@ class LSTMTrainer:
 
         # Load checkpoint if available
         try:
-            model, optimizer, scheduler, start_epoch, best_val_loss = self.load_checkpoint(model, optimizer, scheduler)
-        except Exception as e:
-            self.logger.info(f"No checkpoint found, starting from scratch. {str(e)}")
+            # Load checkpoint if it exists
+            model, optimizer, scheduler, start_epoch, best_val_loss, loaded_hyperparams = self.load_checkpoint(
+                model, optimizer, scheduler
+            )
+            # Merge loaded hyperparams with current hyperparams
+            hyperparams.update(loaded_hyperparams)
+        except ValueError as e:
+            self.logger.error(f"Error loading checkpoint: {str(e)}")
+            self.logger.info("Starting training from scratch.")
             start_epoch = 1
+            best_val_loss = float('inf')
 
         # Gradient accumulation setup
         if accumulation_steps < 1:
@@ -388,7 +395,8 @@ class LSTMTrainer:
         checkpoint_path = os.path.join(self.out_dir, filename)
         if os.path.exists(checkpoint_path):
             try:
-                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                # Add weights_only=True
+                checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
                 model.load_state_dict(checkpoint['model_state_dict'])
                 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 if scheduler and checkpoint.get('scheduler_state_dict'):
