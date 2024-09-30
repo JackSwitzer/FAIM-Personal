@@ -2,6 +2,7 @@ import os
 import traceback
 import pandas as pd
 import torch.nn as nn
+from tqdm import tqdm
 
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
@@ -32,6 +33,11 @@ def main():
         data_processor.split_data()
 
         feature_cols = data_processor.feature_cols
+        logger.info(f"Data processing completed. Number of features: {len(feature_cols)}")
+        logger.info(f"Train set size: {len(data_processor.train_data)}, Val set size: {len(data_processor.val_data)}, Test set size: {len(data_processor.test_data)}")
+
+        log_memory_usage()
+        log_gpu_memory()
 
         # Initialize LSTM Trainer
         lstm_trainer = LSTMTrainer(feature_cols, target_variable, device, out_dir=out_dir)
@@ -47,19 +53,31 @@ def main():
             )
         
         # Create sequences and dataloaders
-        X_train, Y_train, _ = lstm_trainer.create_sequences(data_processor.train_data, best_hyperparams['seq_length'])
-        X_val, Y_val, _ = lstm_trainer.create_sequences(data_processor.val_data, best_hyperparams['seq_length'])
-        X_test, Y_test, test_indices = lstm_trainer.create_sequences(data_processor.test_data, best_hyperparams['seq_length'])
+        X_train, Y_train, _ = lstm_trainer.parallel_create_sequences(data_processor.train_data, best_hyperparams['seq_length'])
+        X_val, Y_val, _ = lstm_trainer.parallel_create_sequences(data_processor.val_data, best_hyperparams['seq_length'])
+        X_test, Y_test, test_indices = lstm_trainer.parallel_create_sequences(data_processor.test_data, best_hyperparams['seq_length'])
+
+        logger.info(f"Sequences created. Train: {X_train.shape}, Val: {X_val.shape}, Test: {X_test.shape}")
+
+        log_memory_usage()
+        log_gpu_memory()
 
         train_loader = lstm_trainer._create_dataloader(X_train, Y_train, best_hyperparams['batch_size'], shuffle=False)
         val_loader = lstm_trainer._create_dataloader(X_val, Y_val, best_hyperparams['batch_size'], shuffle=False)
         test_loader = lstm_trainer._create_dataloader(X_test, Y_test, best_hyperparams['batch_size'], shuffle=False)
 
         # Train the Final LSTM Model
+        logger.info(f"Starting LSTM model training with hyperparameters: {best_hyperparams}")
+        train_loader = tqdm(train_loader, desc="Training")
         model, _ = lstm_trainer.train_model(train_loader, val_loader, best_hyperparams.copy())  # Use a copy to avoid modifying the original
+        logger.info("LSTM model training completed.")
+
+        log_memory_usage()
+        log_gpu_memory()
 
         # Evaluate on test set
         _, predictions, targets = lstm_trainer._evaluate(model, test_loader, nn.MSELoss(), return_predictions=True)
+        logger.info(f"LSTM model evaluation completed. Number of predictions: {len(predictions)}")
 
         # Prepare DataFrame with Predictions
         test_data = data_processor.test_data.iloc[test_indices]
@@ -85,6 +103,10 @@ def main():
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
         logger.error(traceback.format_exc())
+    finally:
+        # Cleanup
+        clear_gpu_memory()
+        logger.info("Training run completed.")
 
 if __name__ == "__main__":
     main()
