@@ -1,5 +1,4 @@
 import os
-import logging
 import datetime
 import json
 import numpy as np
@@ -13,15 +12,17 @@ import pandas as pd
 import optuna
 
 from models import LSTMModel, StockDataset
+from utils import get_logger
 
 class LSTMTrainer:
     """
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
     def __init__(self, feature_cols, target_col, device, out_dir="./Data Output/"):
+        self.logger = get_logger()
         self.feature_cols = feature_cols
         self.target_col = target_col
-        logging.info(f"Target column set to: {self.target_col}")
+        self.logger.info(f"Target column set to: {self.target_col}")
         self.device = device
         self.out_dir = out_dir
         self.best_hyperparams = None  # To store the best hyperparameters
@@ -31,9 +32,9 @@ class LSTMTrainer:
         """
         Create sequences of data for LSTM input.
         """
-        logging.info(f"Columns used for sequence creation: {data.columns.tolist()}")
+        self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
         if self.target_col not in data.columns:
-            logging.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
+            self.logger.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
         
         sequences = []
         targets = []
@@ -144,90 +145,105 @@ class LSTMTrainer:
         try:
             model, optimizer, scheduler, start_epoch, best_val_loss = self.load_checkpoint(model, optimizer, scheduler)
         except Exception as e:
-            logging.info(f"No checkpoint found, starting from scratch. {str(e)}")
+            self.logger.info(f"No checkpoint found, starting from scratch. {str(e)}")
             start_epoch = 1
 
         # Gradient accumulation setup
         if accumulation_steps < 1:
             accumulation_steps = 1
-        logging.info(f"Using gradient accumulation with {accumulation_steps} steps")
+        self.logger.info(f"Using gradient accumulation with {accumulation_steps} steps")
         
-        for epoch in range(start_epoch, num_epochs + 1):
-            start_time = datetime.datetime.now()
-            model.train()
-            optimizer.zero_grad()
-            running_loss = 0.0
-            for batch_idx, (batch_X, batch_Y) in enumerate(train_loader):
-                batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
-                outputs = model(batch_X).squeeze(-1)
-                loss = criterion(outputs, batch_Y)
-                loss = loss / accumulation_steps
-                loss.backward()
-                running_loss += loss.item()
+        try:
+            for epoch in range(start_epoch, num_epochs + 1):
+                start_time = datetime.datetime.now()
+                model.train()
+                optimizer.zero_grad()
+                running_loss = 0.0
+                for batch_idx, (batch_X, batch_Y) in enumerate(train_loader):
+                    batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+                    outputs = model(batch_X).squeeze(-1)
+                    loss = criterion(outputs, batch_Y)
+                    loss = loss / accumulation_steps
+                    loss.backward()
+                    running_loss += loss.item()
 
-                if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
-                    if clip_grad_norm:
-                        nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-                    optimizer.step()
-                    optimizer.zero_grad()
+                    if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+                        if clip_grad_norm:
+                            nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                        optimizer.step()
+                        optimizer.zero_grad()
 
-            # Calculate average training loss
-            train_loss = running_loss * accumulation_steps / len(train_loader)
-            epoch_duration = datetime.datetime.now() - start_time
-            logging.info(f"Epoch {epoch}/{num_epochs}, Train Loss: {train_loss:.4f}, Duration: {epoch_duration}")
-            train_losses.append(train_loss)
+                # Calculate average training loss
+                train_loss = running_loss * accumulation_steps / len(train_loader)
+                epoch_duration = datetime.datetime.now() - start_time
+                self.logger.info(f"Epoch {epoch}/{num_epochs}, Train Loss: {train_loss:.4f}, Duration: {epoch_duration}")
+                train_losses.append(train_loss)
 
-            if val_loader is not None:
-                val_loss = self._evaluate(model, val_loader, criterion)
-                logging.info(f"Epoch {epoch}/{num_epochs}, Validation Loss: {val_loss:.4f}")
-                val_losses.append(val_loss)
+                if val_loader is not None:
+                    val_loss = self._evaluate(model, val_loader, criterion)
+                    self.logger.info(f"Epoch {epoch}/{num_epochs}, Validation Loss: {val_loss:.4f}")
+                    val_losses.append(val_loss)
 
-                # Update scheduler and save best model
-                if scheduler:
-                    scheduler.step(val_loss)
-                    # Log the current learning rate
-                    current_lr = scheduler.optimizer.param_groups[0]['lr']
-                    logging.info(f"Current learning rate: {current_lr:.6f}")
+                    # Update scheduler and save best model
+                    if scheduler:
+                        scheduler.step(val_loss)
+                        # Log the current learning rate
+                        current_lr = scheduler.optimizer.param_groups[0]['lr']
+                        self.logger.info(f"Current learning rate: {current_lr:.6f}")
 
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    best_model_state = model.state_dict()
-                    best_optimizer_state = optimizer.state_dict()
-                    best_scheduler_state = scheduler.state_dict() if scheduler else None
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_model_state = model.state_dict()
+                        best_optimizer_state = optimizer.state_dict()
+                        best_scheduler_state = scheduler.state_dict() if scheduler else None
 
-                    # Save checkpoint
-                    checkpoint = {
-                        'epoch': epoch,
-                        'model_state_dict': best_model_state,
-                        'optimizer_state_dict': best_optimizer_state,
-                        'scheduler_state_dict': best_scheduler_state,
-                        'best_val_loss': best_val_loss,
-                        'hyperparams': hyperparams
-                    }
-                    torch.save(checkpoint, os.path.join(self.out_dir, 'best_checkpoint.pth'))
-                    logging.info(f"Checkpoint saved at epoch {epoch} with validation loss: {best_val_loss:.4f}")
-            else:
-                # Save model periodically even without validation
-                if epoch % 10 == 0:
-                    checkpoint = {
-                        'epoch': epoch,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                        'hyperparams': hyperparams
-                    }
-                    torch.save(checkpoint, os.path.join(self.out_dir, f'checkpoint_epoch_{epoch}.pth'))
-                    logging.info(f"Checkpoint saved at epoch {epoch}")
+                        # Save checkpoint
+                        checkpoint = {
+                            'epoch': epoch,
+                            'model_state_dict': best_model_state,
+                            'optimizer_state_dict': best_optimizer_state,
+                            'scheduler_state_dict': best_scheduler_state,
+                            'best_val_loss': best_val_loss,
+                            'hyperparams': hyperparams
+                        }
+                        torch.save(checkpoint, os.path.join(self.out_dir, 'best_checkpoint.pth'))
+                        self.logger.info(f"Checkpoint saved at epoch {epoch} with validation loss: {best_val_loss:.4f}")
+                else:
+                    # Save model periodically even without validation
+                    if epoch % 10 == 0:
+                        checkpoint = {
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                            'hyperparams': hyperparams
+                        }
+                        torch.save(checkpoint, os.path.join(self.out_dir, f'checkpoint_epoch_{epoch}.pth'))
+                        self.logger.info(f"Checkpoint saved at epoch {epoch}")
 
-        # Save training metrics
-        self.save_training_metrics(train_losses, val_losses)
+            # Save training metrics
+            self.save_training_metrics(train_losses, val_losses)
 
-        # Load the best model state if available
-        if best_model_state:
-            model.load_state_dict(best_model_state)
-            logging.info("Loaded best model state.")
+            # Load the best model state if available
+            if best_model_state:
+                model.load_state_dict(best_model_state)
+                self.logger.info("Loaded best model state.")
 
-        return model, best_val_loss if val_loader is not None else None
+            return model, best_val_loss if val_loader is not None else None
+        except KeyboardInterrupt:
+            self.logger.info("Training interrupted by user. Saving current model state...")
+            # Save checkpoint
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'best_val_loss': best_val_loss,
+                'hyperparams': hyperparams
+            }
+            torch.save(checkpoint, os.path.join(self.out_dir, 'interrupted_checkpoint.pth'))
+            self.logger.info(f"Checkpoint saved at epoch {epoch}. Training can be resumed later.")
+            raise  # Re-raise the exception to exit
 
     def optimize_hyperparameters(self, train_data, val_data, n_trials=50):
         """
@@ -313,13 +329,13 @@ class LSTMTrainer:
     def save_best_hyperparams(self):
         """Save the best hyperparameters to a JSON file."""
         if self.best_hyperparams is None:
-            logging.info("No hyperparameters to save.")
+            self.logger.info("No hyperparameters to save.")
             return
 
         file_path = os.path.join(self.out_dir, "best_hyperparams.json")
         with open(file_path, 'w') as f:
             json.dump(self.best_hyperparams, f, indent=2)
-        logging.info(f"Best hyperparameters saved to: {file_path}")
+        self.logger.info(f"Best hyperparameters saved to: {file_path}")
 
     def load_best_hyperparams(self):
         """Load the best hyperparameters from a JSON file."""
@@ -327,10 +343,10 @@ class LSTMTrainer:
         if os.path.exists(file_path):
             with open(file_path, 'r') as f:
                 self.best_hyperparams = json.load(f)
-            logging.info(f"Loaded best hyperparameters from: {file_path}")
+            self.logger.info(f"Loaded best hyperparameters from: {file_path}")
             return True
         else:
-            logging.info(f"No hyperparameter file found at: {file_path}")
+            self.logger.info(f"No hyperparameter file found at: {file_path}")
             return False
 
     def load_checkpoint(self, model, optimizer, scheduler=None, filename='best_checkpoint.pth'):
@@ -344,10 +360,24 @@ class LSTMTrainer:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            logging.info(f"Resuming from checkpoint at epoch {start_epoch -1}")
+            self.logger.info(f"Resuming from checkpoint at epoch {start_epoch -1}")
             return model, optimizer, scheduler, start_epoch, best_val_loss
         else:
-            raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
+            # Check for interrupted checkpoint
+            interrupted_checkpoint_path = os.path.join(self.out_dir, 'interrupted_checkpoint.pth')
+            if os.path.exists(interrupted_checkpoint_path):
+                checkpoint = torch.load(interrupted_checkpoint_path, map_location=self.device)
+                model.load_state_dict(checkpoint['model_state_dict'])
+
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                if scheduler and checkpoint.get('scheduler_state_dict'):
+                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                start_epoch = checkpoint['epoch'] + 1
+                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+                self.logger.info(f"Resuming from interrupted checkpoint at epoch {start_epoch -1}")
+                return model, optimizer, scheduler, start_epoch, best_val_loss
+            else:
+                raise FileNotFoundError(f"No checkpoint found at {checkpoint_path} or {interrupted_checkpoint_path}")
 
     def save_training_metrics(self, train_losses, val_losses):
         metrics = {
@@ -356,7 +386,7 @@ class LSTMTrainer:
         }
         with open(os.path.join(self.out_dir, 'training_metrics.json'), 'w') as f:
             json.dump(metrics, f)
-        logging.info("Training metrics saved.")
+        self.logger.info("Training metrics saved.")
 
     def _train_epoch(self, model, dataloader, criterion, optimizer, clip_grad_norm=None):
         """Train the model for one epoch."""

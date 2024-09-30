@@ -4,7 +4,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
 from sklearn.model_selection import GridSearchCV
-import logging
+
+from utils import get_logger
 
 class StockDataset(Dataset):
     """
@@ -12,6 +13,7 @@ class StockDataset(Dataset):
     Efficiently handles large datasets by utilizing memory mapping.
     """
     def __init__(self, sequences, targets):
+        self.logger = get_logger()
         self.sequences = sequences
         self.targets = targets
 
@@ -26,6 +28,7 @@ class RegressionModels:
     A class that encapsulates training and prediction with different regression models.
     """
     def __init__(self, Y_mean):
+        self.logger = get_logger()
         self.Y_mean = Y_mean
         self.models = {}
         self.predictions = {}
@@ -35,7 +38,7 @@ class RegressionModels:
         reg = LinearRegression(fit_intercept=False)
         reg.fit(X_train, Y_train_dm)
         self.models['ols'] = reg
-        logging.info("Linear Regression model trained.")
+        self.logger.info("Linear Regression model trained.")
 
     def train_lasso(self, X_train, Y_train_dm, alphas=None):
         """Train a Lasso Regression model with cross-validation."""
@@ -47,7 +50,7 @@ class RegressionModels:
         )
         grid_search.fit(X_train, Y_train_dm)
         self.models['lasso'] = grid_search.best_estimator_
-        logging.info(f"Lasso Regression model trained with alpha: {grid_search.best_estimator_.alpha}")
+        self.logger.info(f"Lasso Regression model trained with alpha: {grid_search.best_estimator_.alpha}")
 
     def train_ridge(self, X_train, Y_train_dm, alphas=None):
         """Train a Ridge Regression model with cross-validation."""
@@ -59,7 +62,7 @@ class RegressionModels:
         )
         grid_search.fit(X_train, Y_train_dm)
         self.models['ridge'] = grid_search.best_estimator_
-        logging.info(f"Ridge Regression model trained with alpha: {grid_search.best_estimator_.alpha}")
+        self.logger.info(f"Ridge Regression model trained with alpha: {grid_search.best_estimator_.alpha}")
 
     def train_elastic_net(self, X_train, Y_train_dm, alphas=None, l1_ratios=None):
         """Train an Elastic Net Regression model with cross-validation."""
@@ -74,7 +77,7 @@ class RegressionModels:
         )
         grid_search.fit(X_train, Y_train_dm)
         self.models['en'] = grid_search.best_estimator_
-        logging.info(
+        self.logger.info(
             f"Elastic Net model trained with alpha: {grid_search.best_estimator_.alpha}, "
             f"l1_ratio: {grid_search.best_estimator_.l1_ratio}"
         )
@@ -83,7 +86,7 @@ class RegressionModels:
         """Generate predictions using the trained models."""
         for model_name, model in self.models.items():
             self.predictions[model_name] = model.predict(X_test) + self.Y_mean
-        logging.info("Predictions generated.")
+        self.logger.info("Predictions generated.")
 
     def get_predictions(self):
         """Retrieve the predictions dictionary."""

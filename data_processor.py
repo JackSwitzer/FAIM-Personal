@@ -1,17 +1,19 @@
 import pandas as pd
 import numpy as np
 import datetime
-import logging
 from sklearn.preprocessing import StandardScaler
 from multiprocessing import Pool
+
+from utils import get_logger
 
 class DataProcessor:
     """
     A class to handle data loading, preprocessing, transformation, and splitting.
     """
     def __init__(self, data_in_path, ret_var='stock_exret', standardize=True):
+        self.logger = get_logger()
         self.ret_var = ret_var
-        logging.info(f"Target variable (ret_var) set to: {self.ret_var}")
+        self.logger.info(f"Target variable (ret_var) set to: {self.ret_var}")
         self.data_in_path = data_in_path
         self.standardize = standardize
         self.scaler = None
@@ -28,11 +30,11 @@ class DataProcessor:
             parse_dates=["date"],
             low_memory=False
         )
-        logging.info(f"Data loaded from {self.data_in_path}")
+        self.logger.info(f"Data loaded from {self.data_in_path}")
 
         # Optimize data types to reduce memory usage
         self._optimize_data_types()
-        logging.info("Data types optimized to reduce memory usage.")
+        self.logger.info("Data types optimized to reduce memory usage.")
 
     def _optimize_data_types(self):
       """Optimize data types to reduce memory usage."""
@@ -61,13 +63,13 @@ class DataProcessor:
         if self.standardize:
             self.scaler = StandardScaler()
             self.stock_data[self.feature_cols] = self.scaler.fit_transform(self.stock_data[self.feature_cols])
-            logging.info("Data standardized.")
+            self.logger.info("Data standardized.")
             # Cast to float32
             self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
 
-        logging.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
+        self.logger.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
         if self.ret_var not in self.stock_data.columns:
-            logging.error(f"Target column '{self.ret_var}' not found in the data.")
+            self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
 
     def split_data(self, train_pct=None, val_pct=None, test_pct=None):
         """Split data into training, validation, and test sets."""
@@ -81,7 +83,7 @@ class DataProcessor:
         self.train_data.reset_index(drop=True, inplace=True)
         self.val_data.reset_index(drop=True, inplace=True)
         self.test_data.reset_index(drop=True, inplace=True)
-        logging.info("Data split into training, validation, and test sets.")
+        self.logger.info("Data split into training, validation, and test sets.")
 
     def _time_based_split(self):
         """Split data based on predefined time periods."""

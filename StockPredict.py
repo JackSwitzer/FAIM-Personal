@@ -1,5 +1,4 @@
 import os
-import logging
 import traceback
 import pandas as pd
 import torch.nn as nn
@@ -8,14 +7,13 @@ from data_processor import DataProcessor
 from trainer import LSTMTrainer
 from utils import *
 
-# Set up logging
-out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
-os.makedirs(out_dir, exist_ok=True)
-setup_logging(out_dir)
-
-set_seed()
-
 def main():
+    out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
+    os.makedirs(out_dir, exist_ok=True)
+    setup_logging(out_dir)
+    logger = get_logger()
+
+    set_seed()
     try:
         clear_gpu_memory()
         check_torch_version()
@@ -25,10 +23,10 @@ def main():
 
         # Allow for configurable target variable
         target_variable = 'stock_exret'  # Change this to your desired target, e.g., 'stock_price'
-        logging.info(f"Target variable set to: {target_variable}")
+        logger.info(f"Target variable set to: {target_variable}")
 
         # Data processing
-        data_processor = DataProcessor(full_data_path, standardize=True)
+        data_processor = DataProcessor(full_data_path, target_variable, standardize=True)
         data_processor.load_data()
         data_processor.preprocess_data()
         data_processor.split_data()
@@ -40,7 +38,7 @@ def main():
 
         # Load best hyperparameters or optimize if not available
         if not lstm_trainer.load_best_hyperparams():
-            logging.info("Starting hyperparameter optimization...")
+            logger.info("Starting hyperparameter optimization...")
             best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
                 data_processor.train_data,
                 data_processor.val_data,
@@ -81,14 +79,14 @@ def main():
         yreal = reg_pred_lstm[lstm_trainer.target_col]
         ypred = reg_pred_lstm['lstm_prediction']
         r2_lstm = calculate_oos_r2(yreal.values, ypred.values)
-        logging.info(f'LSTM OOS R2: {r2_lstm:.4f}')
+        logger.info(f'LSTM OOS R2: {r2_lstm:.4f}')
 
         # Save LSTM predictions
         save_csv(reg_pred_lstm, out_dir, 'lstm_predictions.csv')
 
     except Exception as e:
-        logging.error(f"An error occurred: {str(e)}")
-        logging.error(traceback.format_exc())
+        logger.error(f"An error occurred: {str(e)}")
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     main()
