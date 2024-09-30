@@ -16,6 +16,7 @@ logger.setLevel(logging.INFO)
 
 def setup_logging(out_dir, level=logging.INFO):
     """Set up logging configuration with a unique log file name."""
+    global logger
     if not logger.handlers:
         # Create log directory
         log_dir = os.path.join(out_dir, "logs")
