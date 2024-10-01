@@ -4,15 +4,14 @@ import shutil
 import json
 import numpy as np
 import multiprocessing
-from functools import partial
 import time
+import traceback
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, IterableDataset, Dataset
+from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
-
 import pandas as pd
 import optuna
 from tqdm import tqdm
@@ -25,53 +24,37 @@ class LSTMTrainer:
     """
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
-    def __init__(self, feature_cols, target_col, device, out_dir=Config.OUT_DIR, model_weights_dir=Config.MODEL_WEIGHTS_DIR):
-        self.logger = get_logger()
+    def __init__(self, feature_cols, target_col, device=Config.DEVICE, config=Config):
+        self.logger = logging.getLogger(__name__)  # Use module-level logger
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.logger.info(f"Target column set to: {self.target_col}")
         self.device = device
-        self.out_dir = out_dir
-        self.model_weights_dir = model_weights_dir if model_weights_dir else os.path.join(out_dir, "model_weights")
+        self.config = config
+        self.out_dir = config.OUT_DIR
+        self.model_weights_dir = config.MODEL_WEIGHTS_DIR or os.path.join(self.out_dir, "model_weights")
         self.best_hyperparams = None  # To store the best hyperparameters
         os.makedirs(self.out_dir, exist_ok=True)  # Ensure output directory exists
         os.makedirs(self.model_weights_dir, exist_ok=True)  # Ensure model weights directory exists
 
-    def create_sequences(self, data, seq_length):
+    def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
         """
-        Create sequences of data for LSTM input using a generator.
+        Create a DataLoader for the given data.
         """
-        self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
-        if self.target_col not in data.columns:
-            self.logger.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
-            return
-        
-        data = data.sort_values(['permno', 'date'])
-        grouped = data.groupby('permno')
-
-        for permno, group in grouped:
-            group_length = len(group)
-            if group_length < seq_length:
-                self.logger.debug(f"Skipping 'permno' {permno} due to insufficient data. Group size: {group_length}")
-                continue
-            group_X = group[self.feature_cols].values
-            group_Y = group[self.target_col].values
-            group_indices = group.index.values
-            for i in range(group_length - seq_length + 1):
-                seq = group_X[i:i+seq_length]
-                target = group_Y[i+seq_length-1]
-                target_index = group_indices[i+seq_length-1]
-                yield seq, target, target_index
-
-    def _create_dataloader(self, data, seq_length, batch_size, num_workers=0):
-        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
+        dataset = SequenceDataset(
+            data, 
+            seq_length,
+            self.feature_cols, 
+            self.target_col
+        )
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=False, 
             num_workers=num_workers,
             pin_memory=True
         )
+        return dataloader
 
     def train_model(self, train_data, val_data, test_data, hyperparams, trial=None):
         """
@@ -86,7 +69,7 @@ class LSTMTrainer:
 
         Returns:
             model (nn.Module): Trained model.
-            best_val_loss (float): Best validation loss achieved.
+            training_history (dict): Dictionary containing training history.
         """
         self.logger.info(f"Starting training with hyperparameters: {hyperparams}")
         self.logger.info(f"Training on device: {self.device}")
@@ -98,7 +81,7 @@ class LSTMTrainer:
         num_epochs = hyperparams.get('num_epochs', Config.NUM_EPOCHS)
         accumulation_steps = hyperparams.get('accumulation_steps', Config.ACCUMULATION_STEPS)
         clip_grad_norm = hyperparams.get('clip_grad_norm', Config.CLIP_GRAD_NORM)
-        
+
         # Get LSTM params, update with any provided in hyperparams
         lstm_params = Config.get_lstm_params()
         lstm_params.update({k: v for k, v in hyperparams.items() if k in lstm_params})
@@ -142,7 +125,7 @@ class LSTMTrainer:
             model, optimizer, scheduler, start_epoch, best_val_loss, loaded_hyperparams = self.load_checkpoint(
                 model, optimizer, scheduler
             )
-            
+
             # Check if loaded hyperparameters match current hyperparameters
             if loaded_hyperparams and loaded_hyperparams != hyperparams:
                 self.logger.warning("Loaded hyperparameters do not match current hyperparameters. "
@@ -155,17 +138,17 @@ class LSTMTrainer:
         # Gradient accumulation setup
         if accumulation_steps < 1:
             accumulation_steps = 1
-        self.logger.info(f"Using gradient accumulation with {accumulation_steps} steps")
-        
+        self.logger.debug(f"Using gradient accumulation with {accumulation_steps} steps")
+
         # Adjust number of workers to a reasonable number
         num_workers = hyperparams.get('num_workers', Config.NUM_WORKERS)
-        num_workers = min(num_workers, 4)  
+        num_workers = min(num_workers, 4)
 
         # Create data loaders outside the training loop
         train_loader = self._create_dataloader(train_data, seq_length, batch_size, num_workers=num_workers)
         val_loader = self._create_dataloader(val_data, seq_length, batch_size, num_workers=num_workers) if val_data is not None else None
         test_loader = self._create_dataloader(test_data, seq_length, batch_size, num_workers=num_workers) if test_data is not None else None
-        
+
         last_log_time = time.time()
         total_train_time = 0
 
@@ -186,12 +169,12 @@ class LSTMTrainer:
                 if epoch % Config.LOG_INTERVAL == 0 or epoch == num_epochs:
                     current_time = time.time()
                     time_since_last_log = current_time - last_log_time
-                    
+
                     self.logger.info(f"Epoch {epoch}/{num_epochs} completed")
                     self.logger.info(f"Time since last log: {time_since_last_log:.2f} seconds")
                     self.logger.info(f"Average time per epoch: {total_train_time / (epoch - start_epoch + 1):.2f} seconds")
                     self.logger.info(f"Train Loss: {train_loss:.4f}")
-                    
+
                     # Log GPU and memory usage
                     log_memory_usage()
                     log_gpu_memory_usage()
@@ -202,7 +185,7 @@ class LSTMTrainer:
                 if val_loader is not None:
                     val_loss = self._evaluate(model, val_loader, criterion)
                     val_losses.append(val_loss)
-                    
+
                     # Log validation loss at specified intervals or on the last epoch
                     if epoch % Config.LOG_INTERVAL == 0 or epoch == num_epochs:
                         self.logger.info(f"Validation Loss: {val_loss:.4f}")
@@ -254,60 +237,118 @@ class LSTMTrainer:
                 model.load_state_dict(best_model_state)
                 self.logger.info("Loaded best model state.")
 
-            return model, best_val_loss if val_data is not None else None
+            training_history = {
+                'train_losses': train_losses,
+                'val_losses': val_losses,
+                'test_losses': test_losses
+            }
+            return model, training_history
+
         except KeyboardInterrupt:
-            self.logger.info("Training interrupted by user. Saving current model state...")
-            # Save checkpoint only if not in hyperparameter optimization
+            self.logger.warning("Training interrupted by user.")
+            self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+            raise
+
+        except Exception as e:
+            self.logger.error(f"An error occurred during training: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+            raise
+
+        finally:
+            # Cleanup
+            self.logger.info("Training run completed or interrupted.")
             if trial is None:
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                    'best_val_loss': best_val_loss,
-                    'hyperparams': hyperparams
-                }
-                checkpoint_path = os.path.join(self.model_weights_dir, 'interrupted_checkpoint.pth')
-                torch.save(checkpoint, checkpoint_path)
-                self.logger.info(f"Checkpoint saved at epoch {epoch}. Training can be resumed later.")
-            raise  # Re-raise the exception to exit
+                self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+
+    def _save_interrupted_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
+        """Save the current state when training is interrupted."""
+        try:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'best_val_loss': best_val_loss,
+                'hyperparams': hyperparams
+            }
+            checkpoint_path = os.path.join(self.model_weights_dir, 'interrupted_checkpoint.pth')
+            torch.save(checkpoint, checkpoint_path)
+            self.logger.info(f"Interrupted state saved at epoch {epoch}. Training can be resumed later.")
+        except Exception as e:
+            self.logger.error(f"Failed to save interrupted state: {str(e)}")
+
+    def _save_final_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
+        """Save the final state of training."""
+        try:
+            # Convert numpy.int64 to int
+            def convert_to_native(obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_to_native(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_native(i) for i in obj]
+                else:
+                    return obj
+
+            # Save the final model state
+            final_model_path = os.path.join(self.model_weights_dir, 'final_model.pth')
+            torch.save(model.state_dict(), final_model_path)
+            self.logger.info(f"Final model state saved to {final_model_path}")
+
+            # Save the final checkpoint
+            final_checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'best_val_loss': best_val_loss,
+                'hyperparams': convert_to_native(hyperparams)
+            }
+            final_checkpoint_path = os.path.join(self.model_weights_dir, 'final_checkpoint.pth')
+            torch.save(final_checkpoint, final_checkpoint_path)
+            self.logger.info(f"Final checkpoint saved to {final_checkpoint_path}")
+
+            # Save the hyperparameters
+            self.save_hyperparams(hyperparams, is_best=False)
+            self.logger.info("Final hyperparameters saved.")
+        except Exception as e:
+            self.logger.error(f"Failed to save final state: {str(e)}")
 
     def optimize_hyperparameters(self, train_data, val_data, test_data, n_trials=Config.N_TRIALS):
         """
         Optimize hyperparameters using Optuna.
-
-        Args:
-            train_data (DataFrame): Training data.
-            val_data (DataFrame): Validation data.
-            test_data (DataFrame): Test data.
-            n_trials (int): Number of trials for optimization.
-
-        Returns:
-            best_hyperparams (dict): Best hyperparameters found.
-            best_val_loss (float): Best validation loss achieved.
         """
         def objective(trial):
             hyperparams = {
-                'seq_length': trial.suggest_categorical('seq_length', [1, 2, 3, 5]),  # Experiment with shorter sequence lengths
-                'batch_size': trial.suggest_categorical('batch_size', [128, 256, 512]),  # Increased batch sizes
+                'seq_length': trial.suggest_int('seq_length', 2, 12),
+                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),
                 'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
-                'num_epochs': 20,
+                'num_epochs': Config.HYPEROPT_EPOCHS,
                 'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256]),
-                'num_layers': trial.suggest_int('num_layers', 1, 3),
+                'num_layers': trial.suggest_int('num_layers', 1, 4),
                 'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.3),
                 'bidirectional': trial.suggest_categorical('bidirectional', [False]),
                 'use_batch_norm': trial.suggest_categorical('use_batch_norm', [True]),
                 'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU', 'ELU']),
-                'fc1_size': trial.suggest_categorical('fc1_size', [32, 64, 128]),
-                'fc2_size': trial.suggest_categorical('fc2_size', [16, 32, 64]),
+                'fc1_size': trial.suggest_categorical('fc1_size', [16, 32, 64, 128]),
+                'fc2_size': trial.suggest_categorical('fc2_size', [16, 32, 64, 128]),
             }
 
             # Train the model with pruning
             try:
-                _, val_loss = self.train_model(train_data, val_data, test_data, hyperparams, trial=trial)
+                model, training_history = self.train_model(train_data, val_data, test_data, hyperparams, trial=trial)
+                
+                # Use the last validation loss as the objective value
+                last_val_loss = training_history['val_losses'][-1]
+                return last_val_loss
             except optuna.exceptions.TrialPruned:
                 raise
-            return val_loss
 
         # Setup Optuna study with pruning
         study = optuna.create_study(direction='minimize', pruner=optuna.pruners.MedianPruner())
@@ -315,6 +356,7 @@ class LSTMTrainer:
 
         # Store and return best hyperparameters
         self.best_hyperparams = study.best_params
+        self.best_hyperparams['num_epochs'] = Config.HYPEROPT_EPOCHS
         best_val_loss = study.best_value
 
         # Train and save the best model
@@ -335,17 +377,29 @@ class LSTMTrainer:
         return self.best_hyperparams, best_val_loss
 
     def load_hyperparams(self, is_best=True):
-        """Load hyperparameters from a JSON file."""
-        filename = "best_hyperparams.json" if is_best else "current_hyperparams.json"
-        file_path = os.path.join(self.out_dir, filename)
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
+        # Adjust method to load hyperparameters for the single target variable
+        filename = "best_hyperparams.json" if is_best else "hyperparams.json"
+        filepath = os.path.join(self.out_dir, filename)
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
                 hyperparams = json.load(f)
-            self.logger.info(f"Loaded hyperparameters from: {file_path}")
             return hyperparams
         else:
-            self.logger.info(f"No hyperparameter file found at: {file_path}")
+            self.logger.info(f"No hyperparameter file found at: {filepath}")
             return None
+
+    def save_hyperparams(self, hyperparams, is_best=False):
+        # Adjust method to save hyperparameters for the single target variable
+        filename = "best_hyperparams.json" if is_best else "hyperparams.json"
+        filepath = os.path.join(self.out_dir, filename)
+        with open(filepath, 'w') as f:
+            json.dump(hyperparams, f)
+
+    def save_model(self, model, is_best=False):
+        # Adjust method to save model weights for stock_exret
+        filename = "best_model.pt" if is_best else "model.pt"
+        filepath = os.path.join(self.model_weights_dir, filename)
+        torch.save(model.state_dict(), filepath)
 
     def save_checkpoint(self, state, is_best=False, filename='checkpoint.pth.tar'):
         """
@@ -406,10 +460,9 @@ class LSTMTrainer:
         optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
-            batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
-            
-            # Optionally disable autocast for testing
-            # with torch.no_grad():
+            batch_X = batch_X.to(self.device, non_blocking=True)
+            batch_Y = batch_Y.to(self.device, non_blocking=True)
+
             with autocast(device_type=self.device.type, dtype=torch.float16):
                 outputs = model(batch_X).squeeze(-1)
                 loss = criterion(outputs, batch_Y) / accumulation_steps
@@ -420,15 +473,14 @@ class LSTMTrainer:
                 if clip_grad_norm:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-                
+
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)  # Reset gradients after optimizer step
 
-            batch_size = batch_Y.size(0)
-            total_loss += loss.item() * accumulation_steps * batch_size  # Adjust total loss
+            total_loss += loss.detach() * accumulation_steps * batch_Y.size(0)  # Avoid .item() inside loop
 
-        avg_loss = total_loss / len(dataloader.dataset)
+        avg_loss = total_loss.item() / len(dataloader.dataset)
         return avg_loss
 
     def _evaluate(self, model, dataloader, criterion, return_predictions=False):
@@ -439,7 +491,8 @@ class LSTMTrainer:
         targets = []
         with torch.no_grad():
             for batch_X, batch_Y in dataloader:
-                batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+                batch_X = batch_X.to(self.device, non_blocking=True)
+                batch_Y = batch_Y.to(self.device, non_blocking=True)
                 outputs = model(batch_X).squeeze(-1)
                 loss = criterion(outputs, batch_Y)
                 batch_size = batch_Y.size(0)
@@ -453,11 +506,3 @@ class LSTMTrainer:
             return avg_loss, predictions, targets
         else:
             return avg_loss
-
-    def save_hyperparams(self, hyperparams, is_best=False):
-        """Save hyperparameters to a JSON file."""
-        filename = "best_hyperparams.json" if is_best else "current_hyperparams.json"
-        file_path = os.path.join(self.out_dir, filename)
-        with open(file_path, 'w') as f:
-            json.dump(hyperparams, f, indent=2)
-        self.logger.info(f"Hyperparameters saved to: {file_path}")

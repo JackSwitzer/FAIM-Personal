@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from multiprocessing import Pool
 from itertools import chain
+import logging
 
 from utils import get_logger
 from config import Config
@@ -12,7 +13,7 @@ class DataProcessor:
     A class to handle data loading, preprocessing, transformation, and splitting.
     """
     def __init__(self, data_in_path, ret_var='stock_exret', standardize=True):
-        self.logger = get_logger()
+        self.logger = logging.getLogger(__name__)  # Use module-level logger
         self.ret_var = ret_var
         self.data_in_path = data_in_path
         self.standardize = standardize
@@ -52,16 +53,22 @@ class DataProcessor:
 
     def preprocess_data(self):
         """Preprocess the data: handle missing values, select features, and standardize if needed."""
+        # Work on a copy of the data to avoid modifying the original
+        self.stock_data = self.stock_data.copy()
+
         # Extract temporal features for seasonality
         self.stock_data['month'] = self.stock_data['date'].dt.month
         self.stock_data['day_of_week'] = self.stock_data['date'].dt.dayofweek
         self.stock_data['quarter'] = self.stock_data['date'].dt.quarter
 
-        # Encode cyclical features
-        self.stock_data['month_sin'] = np.sin(2 * np.pi * self.stock_data['month']/12)
-        self.stock_data['month_cos'] = np.cos(2 * np.pi * self.stock_data['month']/12)
-        self.stock_data['day_of_week_sin'] = np.sin(2 * np.pi * self.stock_data['day_of_week']/7)
-        self.stock_data['day_of_week_cos'] = np.cos(2 * np.pi * self.stock_data['day_of_week']/7)
+        # Create new cyclical features in bulk
+        cyclical_features = pd.DataFrame({
+            'month_sin': np.sin(2 * np.pi * self.stock_data['month'] / 12),
+            'month_cos': np.cos(2 * np.pi * self.stock_data['month'] / 12),
+            'day_of_week_sin': np.sin(2 * np.pi * self.stock_data['day_of_week'] / 7),
+            'day_of_week_cos': np.cos(2 * np.pi * self.stock_data['day_of_week'] / 7),
+        })
+        self.stock_data = pd.concat([self.stock_data, cyclical_features], axis=1)
 
         # Exclude non-feature columns
         non_feature_cols = ["year", "month", "day_of_week", "quarter", "date", "permno", self.ret_var]
@@ -70,32 +77,50 @@ class DataProcessor:
         numeric_cols = self.stock_data.select_dtypes(include=['number']).columns.tolist()
         self.feature_cols = [col for col in numeric_cols if col not in non_feature_cols]
 
-        # Include the new cyclical features
-        self.feature_cols.extend(['month_sin', 'month_cos', 'day_of_week_sin', 'day_of_week_cos'])
+        # Include the new cyclical features without duplicates
+        additional_cols = ['month_sin', 'month_cos', 'day_of_week_sin', 'day_of_week_cos']
+        self.feature_cols.extend([col for col in additional_cols if col not in self.feature_cols])
+
+        # Ensure feature_cols has unique columns
+        self.feature_cols = list(set(self.feature_cols))
+
+        # Check for missing feature columns in self.stock_data
+        missing_cols = [col for col in self.feature_cols if col not in self.stock_data.columns]
+        if missing_cols:
+            self.logger.error(f"The following feature columns are missing from the data: {missing_cols}")
 
         # Handle missing values
-        self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].fillna(0).astype('float32')
+        self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].fillna(0)
 
         # Standardization
         if self.standardize:
             self.scaler = StandardScaler()
             self.stock_data[self.feature_cols] = self.scaler.fit_transform(self.stock_data[self.feature_cols])
             self.logger.info("Data standardized.")
-            # Cast to float32
-            self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
-        
-        # Check for missing values in the target variable
-        if self.stock_data[self.ret_var].isnull().any():
-            self.logger.warning(f"Missing values found in target variable '{self.ret_var}'. Filling with 0.")
-            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].fillna(0).astype('float32')
-        else:
-            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
 
-        self.logger.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
+        # Cast to float32
+        self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
+        
+        # Handle missing values in the target variable
+        if self.stock_data[self.ret_var].isnull().any():
+            self.logger.warning(f"Missing values found in target '{self.ret_var}'. Removing these rows.")
+            self.stock_data = self.stock_data.dropna(subset=[self.ret_var])
+        self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
+
+        self.logger.debug(f"Target column '{self.ret_var}' present in data: {self.ret_var in self.stock_data.columns}")
+        self.logger.debug(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
         if self.ret_var not in self.stock_data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
         
-        self.logger.info(f"Updated feature columns: {self.feature_cols}")
+        self.logger.debug(f"Updated feature columns: {self.feature_cols}")
+
+        # Filter out stocks with insufficient data points
+        self.filter_stocks_by_min_length()
+
+        # Additional check after filtering
+        min_length = self.stock_data.groupby('permno').size().min()
+        if min_length < Config.MIN_SEQUENCE_LENGTH:
+            self.logger.warning(f"After filtering, some stocks still have fewer than {Config.MIN_SEQUENCE_LENGTH} data points. Minimum found: {min_length}")
 
     def split_data(self):
         """
@@ -143,8 +168,8 @@ class DataProcessor:
         if train_years + val_years + test_years < total_years:
             test_years += total_years - (train_years + val_years + test_years)
 
-        self.logger.info(f"Total years: {total_years}")
-        self.logger.info(f"Train years: {train_years}, Validation years: {val_years}, Test years: {test_years}")
+        self.logger.debug(f"Total years: {total_years}")
+        self.logger.debug(f"Train years: {train_years}, Validation years: {val_years}, Test years: {test_years}")
 
         # Calculate split dates
         train_end_date = min_date + pd.DateOffset(years=train_years)
@@ -173,8 +198,8 @@ class DataProcessor:
         actual_val_years = (val_end_date - train_end_date).days / 365.25
         actual_test_years = (max_date - val_end_date).days / 365.25
 
-        self.logger.info(f"Actual split (in years): Train: {actual_train_years:.2f}, "
-                         f"Validation: {actual_val_years:.2f}, Test: {actual_test_years:.2f}")
+        self.logger.debug(f"Actual split (in years): Train: {actual_train_years:.2f}, "
+                          f"Validation: {actual_val_years:.2f}, Test: {actual_test_years:.2f}")
 
         return train_data, val_data, test_data
 
@@ -195,7 +220,7 @@ class DataProcessor:
         """
         Create sequences of data for LSTM input using a generator.
         """
-        self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
+        self.logger.debug(f"Columns used for sequence creation: {data.columns.tolist()}")
         if self.ret_var not in data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data for sequence creation.")
             return
@@ -225,9 +250,54 @@ class DataProcessor:
                 yield seq, target, target_index
 
     def parallel_create_sequences(self, data, seq_length, num_processes=None):
-        with Pool(num_processes) as pool:
-            chunks = np.array_split(data, num_processes)
-            results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
-        
-        # Chain the generators from all processes
-        return chain.from_iterable(results)
+        try:
+            with Pool(num_processes) as pool:
+                chunks = np.array_split(data, num_processes)
+                results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
+            return chain.from_iterable(results)
+        except KeyboardInterrupt:
+            self.logger.warning("KeyboardInterrupt received. Terminating workers.")
+            pool.terminate()
+            pool.join()
+        finally:
+            if 'pool' in locals():
+                pool.close()
+                pool.join()
+
+    def get_min_group_length(self):
+        """
+        Calculate the minimum sequence length (number of data points) across all groups (stocks)
+        in the training, validation, and test datasets.
+        """
+        if self.train_data is None or self.val_data is None or self.test_data is None:
+            self.logger.warning("Data has not been split yet. Returning minimum length from all data.")
+            return self.stock_data.groupby('permno').size().min()
+
+        # Calculate minimum group length in training data
+        train_group_lengths = self.train_data.groupby('permno').size()
+        min_train_length = train_group_lengths.min() if not train_group_lengths.empty else float('inf')
+
+        # Calculate minimum group length in validation data
+        val_group_lengths = self.val_data.groupby('permno').size()
+        min_val_length = val_group_lengths.min() if not val_group_lengths.empty else float('inf')
+
+        # Calculate minimum group length in test data
+        test_group_lengths = self.test_data.groupby('permno').size()
+        min_test_length = test_group_lengths.min() if not test_group_lengths.empty else float('inf')
+
+        # Find the overall minimum
+        min_group_length = min(min_train_length, min_val_length, min_test_length)
+
+        self.logger.info(f"Minimum group lengths - Train: {min_train_length}, Validation: {min_val_length}, Test: {min_test_length}")
+        return min_group_length
+
+    def filter_stocks_by_min_length(self):
+        """
+        Filter out stocks that have fewer data points than MIN_SEQUENCE_LENGTH across all datasets.
+        """
+        min_len = Config.MIN_SEQUENCE_LENGTH
+        group_lengths = self.stock_data.groupby('permno').size()
+        valid_permnos = group_lengths[group_lengths >= min_len].index
+        self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)].copy()
+        self.logger.info(f"Filtered stocks with at least {min_len} data points.")
+        self.logger.info(f"Remaining stocks: {len(valid_permnos)}")
