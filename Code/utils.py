@@ -70,8 +70,15 @@ def calculate_oos_r2(y_true, y_pred):
 
 def clear_gpu_memory():
     """Clear GPU memory by deleting unnecessary variables and emptying the cache."""
-    torch.cuda.empty_cache()
+    for obj in gc.get_objects():
+        try:
+            if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+                del obj
+        except:
+            pass
     gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 def clear_import_cache():
     """Clear the Python import cache by reloading all modules."""
@@ -98,13 +105,13 @@ def log_gpu_memory_usage():
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
         logger.info(f"GPU memory: used={info.used/1024**2:.1f}MB, free={info.free/1024**2:.1f}MB, total={info.total/1024**2:.1f}MB")
-    except:
-        logger.warning("Unable to log GPU memory usage")
+    except pynvml.NVMLError as e:
+        logger.warning(f"Unable to log GPU memory usage: {e}")
     finally:
         try:
             pynvml.nvmlShutdown()
-        except:
-            pass
+        except pynvml.NVMLError as e:
+            logger.warning(f"Error shutting down NVML: {e}")
 
 def check_torch_version():
     required_version = "1.7.0"  # Adjust this to the minimum required version

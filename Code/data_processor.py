@@ -102,8 +102,8 @@ class DataProcessor:
         
         # Handle missing values in the target variable
         if self.stock_data[self.ret_var].isnull().any():
-            self.logger.warning(f"Missing values found in target variable '{self.ret_var}'. Filling with 0.")
-            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].fillna(0)
+            self.logger.warning(f"Missing values found in target '{self.ret_var}'. Removing these rows.")
+            self.stock_data = self.stock_data.dropna(subset=[self.ret_var])
         self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
 
         self.logger.info(f"Target column '{self.ret_var}' present in data: {self.ret_var in self.stock_data.columns}")
@@ -112,6 +112,15 @@ class DataProcessor:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
         
         self.logger.info(f"Updated feature columns: {self.feature_cols}")
+
+        # Filter out stocks with insufficient data points
+        min_seq_length = Config.MIN_SEQUENCE_LENGTH  # Define this parameter in your config
+        stock_counts = self.stock_data.groupby('permno').size()
+        valid_permnos = stock_counts[stock_counts >= min_seq_length].index
+        self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)]
+        
+        self.logger.info(f"Filtered stocks with at least {min_seq_length} data points.")
+        self.logger.info(f"Remaining stocks: {self.stock_data['permno'].nunique()}")
 
     def split_data(self):
         """

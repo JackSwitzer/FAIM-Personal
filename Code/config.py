@@ -13,6 +13,7 @@ class Config:
     # Data processing settings
     TARGET_VARIABLE = 'stock_exret'
     STANDARDIZE = True
+    MIN_SEQUENCE_LENGTH = 10
 
     # Training settings
     NUM_EPOCHS = 1000
@@ -21,9 +22,9 @@ class Config:
     ACCUMULATION_STEPS = 1
     CLIP_GRAD_NORM = 1.0
     USE_ALL_DATA = True
-    NUM_WORKERS = 2
+    NUM_WORKERS = 2  # CHANGE TO 4 or 8 WHEN TESTING
 
-    # LSTM model settings
+    # LSTM hyperparameters
     LSTM_PARAMS = {
         'hidden_size': 128,
         'num_layers': 2,
@@ -32,7 +33,15 @@ class Config:
         'use_batch_norm': True,
         'activation_function': 'LeakyReLU',
         'fc1_size': 64,
-        'fc2_size': 32
+        'fc2_size': 32,
+        'optimizer_name': 'Adam',
+        'learning_rate': 0.001,
+        'weight_decay': 1e-6,
+        'seq_length': 10,
+        'batch_size': 128,
+        'use_scheduler': True,
+        'scheduler_factor': 0.5,
+        'scheduler_patience': 5
     }
 
     # Hyperparameter optimization settings

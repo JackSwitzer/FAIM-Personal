@@ -354,18 +354,18 @@ class LSTMTrainer:
         """
         def objective(trial):
             hyperparams = {
-                'seq_length': trial.suggest_categorical('seq_length', [1, 2, 3, 5]),  # Experiment with shorter sequence lengths
-                'batch_size': trial.suggest_categorical('batch_size', [128, 256, 512]),  # Increased batch sizes
+                'seq_length': trial.suggest_int('seq_length', 2, 12),  # Experiment with shorter sequence lengths
+                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),  # Increased batch sizes
                 'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
                 'num_epochs': 20,
                 'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256]),
-                'num_layers': trial.suggest_int('num_layers', 1, 3),
+                'num_layers': trial.suggest_int('num_layers', 1, 4),
                 'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.3),
                 'bidirectional': trial.suggest_categorical('bidirectional', [False]),
                 'use_batch_norm': trial.suggest_categorical('use_batch_norm', [True]),
                 'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU', 'ELU']),
-                'fc1_size': trial.suggest_categorical('fc1_size', [32, 64, 128]),
-                'fc2_size': trial.suggest_categorical('fc2_size', [16, 32, 64]),
+                'fc1_size': trial.suggest_categorical('fc1_size', [16, 32, 64, 128]),
+                'fc2_size': trial.suggest_categorical('fc2_size', [16, 32, 64, 128]),
             }
 
             # Train the model with pruning

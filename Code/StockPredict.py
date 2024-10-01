@@ -10,15 +10,14 @@ from utils import *
 from models import RegressionModels
 
 def main_Regression():
-    out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = Config.OUT_DIR
     setup_logging(out_dir)
     logger = get_logger()
 
     set_seed()
     try:
-        data_input_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
-        full_data_path = os.path.join(data_input_dir, "hackathon_sample_v2.csv")
+        data_input_dir = Config.DATA_INPUT_DIR
+        full_data_path = Config.FULL_DATA_PATH
 
         target_variable = Config.TARGET_VARIABLE  # Change this if needed
         logger.info(f"Target variable set to: {target_variable}")
@@ -102,37 +101,26 @@ def main():
         # Data processing
         data_processor = DataProcessor(
             Config.FULL_DATA_PATH,
-            target_variable,
+            ret_var=target_variable,
             standardize=Config.STANDARDIZE
         )
         data_processor.load_data()
         data_processor.preprocess_data()
         data_processor.split_data()
 
-        min_group_length = min(
-            data_processor.train_data.groupby('permno').size().min(),
-            data_processor.val_data.groupby('permno').size().min(),
-            data_processor.test_data.groupby('permno').size().min()
-        )
-        logger.info(f"Minimum group length across all sets: {min_group_length}")
-
-        feature_cols = data_processor.feature_cols
-        logger.info(
-            f"Data processing completed for {target_variable}. "
-            f"Features: {len(feature_cols)}, "
-            f"Train: {len(data_processor.train_data)}, "
-            f"Val: {len(data_processor.val_data)}, "
-            f"Test: {len(data_processor.test_data)}"
-        )
-
-        # Initialize LSTM Trainer
+        # Initialize LSTMTrainer
         lstm_trainer = LSTMTrainer(
-            feature_cols,
-            target_variable,
-            device,
-            out_dir=Config.OUT_DIR,
-            model_weights_dir=Config.MODEL_WEIGHTS_DIR
+            feature_cols=data_processor.feature_cols,
+            target_col=target_variable
         )
+
+        # Determine minimum group length
+        min_group_length = data_processor.get_min_group_length()
+        logger.info(f"Minimum group length across all sets: {min_group_length}")
+        if min_group_length < Config.MIN_SEQUENCE_LENGTH:
+            logger.warning(
+                f"The minimum group length {min_group_length} is less than the required sequence length."
+            )
 
         # Load best hyperparameters or optimize if not available
         best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
@@ -161,7 +149,7 @@ def main():
             f"Starting final LSTM model training for {target_variable} "
             f"with hyperparameters: {best_hyperparams}"
         )
-        best_hyperparams['num_epochs'] = Config.NUM_EPOCHS  # Use the number of epochs from the config file
+
         model, training_history = lstm_trainer.train_model(
             data_processor.train_data,
             data_processor.val_data,
@@ -171,17 +159,7 @@ def main():
         logger.info(f"Final LSTM model training completed for {target_variable}.")
 
         # Evaluate on test set
-        test_loader = lstm_trainer._create_dataloader(
-            data_processor.test_data,
-            best_hyperparams['seq_length'],
-            best_hyperparams['batch_size']
-        )
-        _, predictions, targets = lstm_trainer._evaluate(
-            model,
-            test_loader,
-            nn.MSELoss(),
-            return_predictions=True
-        )
+        predictions, targets = lstm_trainer.evaluate_test_set(model, data_processor.test_data, best_hyperparams)
         logger.info(
             f"LSTM model evaluation completed for {target_variable}. "
             f"Number of predictions: {len(predictions)}"
@@ -190,36 +168,20 @@ def main():
         # Prepare DataFrame with Predictions
         test_data = data_processor.test_data.copy()
         test_data.reset_index(drop=True, inplace=True)
-        predictions_df = pd.DataFrame({
-            'permno': test_data['permno'].values,
-            'date': test_data['date'].values,
-            'lstm_prediction': predictions
-        })
-
-        # Merge predictions with test data
-        reg_pred_lstm = pd.merge(test_data, predictions_df, on=['permno', 'date'], how='inner')
-
-        # Check if target column exists
-        if lstm_trainer.target_col not in reg_pred_lstm.columns:
-            logger.error(
-                f"Target column '{lstm_trainer.target_col}' not found in merged DataFrame."
-            )
-            logger.info(f"Available columns: {reg_pred_lstm.columns.tolist()}")
-            return
+        test_data['lstm_prediction'] = predictions
 
         # Calculate OOS R-squared
-        yreal = reg_pred_lstm[lstm_trainer.target_col]
-        ypred = reg_pred_lstm['lstm_prediction']
-        r2_lstm = calculate_oos_r2(yreal.values, ypred.values)
+        yreal = test_data[target_variable]
+        ypred = test_data['lstm_prediction']
+        r2_lstm = calculate_oos_r2(yreal.values, ypred)
         logger.info(f'{target_variable} LSTM OOS R2: {r2_lstm:.4f}')
 
         # Save LSTM predictions
         output_filename = 'lstm_predictions.csv'
-        save_csv(reg_pred_lstm, Config.OUT_DIR, output_filename)
+        save_csv(test_data, Config.OUT_DIR, output_filename)
 
     except KeyboardInterrupt:
         logger.info("Process interrupted by user. Cleaning up...")
-        # Add any cleanup code here
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
         logger.error(traceback.format_exc())
