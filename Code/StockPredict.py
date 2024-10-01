@@ -1,27 +1,27 @@
 import os
+import logging
 import traceback
 import pandas as pd
-import torch.nn as nn
+import torch
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from config import Config
-
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
 from utils import *
 from models import RegressionModels
 
-def main_Regression():
+def main_Regression(rank, world_size):
+    setup(rank, world_size)
     out_dir = Config.OUT_DIR
     setup_logging(out_dir)
     logger = logging.getLogger(__name__)  # Use module-level logger
-
     set_seed()
     try:
         data_input_dir = Config.DATA_INPUT_DIR
         full_data_path = Config.FULL_DATA_PATH
-
         target_variable = Config.TARGET_VARIABLE  # Change this if needed
         logger.info(f"Target variable set to: {target_variable}")
-
         # Data processing
         data_processor = DataProcessor(full_data_path, target_variable, standardize=True)
         data_processor.load_data()
@@ -82,119 +82,75 @@ def main_Regression():
         logger.error(f"An error occurred: {str(e)}")
         logger.error(traceback.format_exc())
     finally:
-        # Cleanup
+        cleanup()
         logger.info("Regression run completed.")
 
-def main():
-    try:
-        setup_logging(Config.OUT_DIR)
-        logger = logging.getLogger(__name__)  # Use module-level logger
-        os.makedirs(Config.MODEL_WEIGHTS_DIR, exist_ok=True)
-        set_seed(Config.SEED)
-        clear_gpu_memory()
-        check_torch_version()
+def main_worker(rank, world_size, config, use_distributed):
+    setup(rank, world_size, use_distributed=use_distributed)
+    set_seed(config.SEED + rank)  # Ensure different seeds for each process
+    setup_logging(config.OUT_DIR, f"train_log_rank_{rank}.log")
+
+    # Set device for this process
+    if use_distributed:
+        torch.cuda.set_device(rank)
+        device = torch.device(f'cuda:{rank}')
+    else:
         device = check_device()
 
-        target_variable = Config.TARGET_VARIABLE  # Set the target variable
-        logger.info(f"Starting training for target variable: {target_variable}")
+    # Initialize DataProcessor
+    data_processor = DataProcessor(config.FULL_DATA_PATH, ret_var=config.TARGET_VARIABLE)
+    data_processor.load_data()
+    data_processor.preprocess_and_split_data()
 
-        # Data processing
-        data_processor = DataProcessor(
-            Config.FULL_DATA_PATH,
-            ret_var=target_variable,
-            standardize=Config.STANDARDIZE
-        )
-        data_processor.load_data()
-        data_processor.preprocess_data()
-        data_processor.split_data()
+    # Adjust sequence length based on the minimum group length
+    min_group_length = data_processor.min_group_length
+    trainer = LSTMTrainer(
+        feature_cols=data_processor.feature_cols,
+        target_col=data_processor.ret_var,
+        device=device,
+        config=config,
+        rank=rank,
+        world_size=world_size,
+        use_distributed=use_distributed
+    )
+    trainer.adjust_sequence_length(min_group_length)
 
-        # Initialize LSTMTrainer
-        lstm_trainer = LSTMTrainer(
-            feature_cols=data_processor.feature_cols,
-            target_col=target_variable,
-            device=device
-        )
+    # Now pass datasets to optimize_hyperparameters
+    train_dataset = data_processor.train_data
+    val_dataset = data_processor.val_data
+    test_dataset = data_processor.test_data
 
-        # Determine minimum group length
-        min_group_length = data_processor.get_min_group_length()
-        logger.info(f"Minimum group length across all sets: {min_group_length}")
-        if min_group_length < Config.MIN_SEQUENCE_LENGTH:
-            logger.warning(
-                f"The minimum group length {min_group_length} is less than the required sequence length."
-            )
-
-        # Load best hyperparameters or optimize if not available
-        best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
-        if best_hyperparams is None:
-            logger.info(f"Starting hyperparameter optimization for {target_variable}...")
-            best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
-                data_processor.train_data,
-                data_processor.val_data,
-                data_processor.test_data,
-                n_trials=Config.N_TRIALS
-            )
-            if best_hyperparams is None:
-                logger.error(f"Hyperparameter optimization failed for {target_variable}.")
-                return
-
-        # Adjust sequence length if necessary
-        if best_hyperparams['seq_length'] > min_group_length:
-            best_hyperparams['seq_length'] = max(min_group_length, Config.MIN_SEQUENCE_LENGTH)
-            logger.info(
-                f"Adjusted sequence length to: {best_hyperparams['seq_length']} "
-                f"due to minimum group length."
-            )
-
-        # Start final training
-        logger.info(
-            f"Starting final LSTM model training for {target_variable} "
-            f"with hyperparameters: {best_hyperparams}"
+    # Load or optimize hyperparameters
+    hyperparams = trainer.load_hyperparams(is_best=True)
+    if hyperparams is None:
+        hyperparams, _ = trainer.optimize_hyperparameters(
+            train_dataset, val_dataset, test_dataset, n_trials=config.N_TRIALS
         )
 
-        model, training_history = lstm_trainer.train_model(
-            data_processor.train_data,
-            data_processor.val_data,
-            data_processor.test_data,
-            best_hyperparams.copy()
-        )
-        logger.info(f"Final LSTM model training completed for {target_variable}.")
+    # Create data loaders with optimized hyperparameters
+    seq_length = hyperparams['seq_length']
+    batch_size = hyperparams['batch_size']
+    train_loader = trainer._create_dataloader(train_dataset, seq_length, batch_size)
+    val_loader = trainer._create_dataloader(val_dataset, seq_length, batch_size)
+    test_loader = trainer._create_dataloader(test_dataset, seq_length, batch_size)
 
-        # Evaluate on test set
-        predictions, targets = lstm_trainer.evaluate_test_set(model, data_processor.test_data, best_hyperparams)
-        logger.info(
-            f"LSTM model evaluation completed for {target_variable}. "
-            f"Number of predictions: {len(predictions)}"
-        )
+    # Train the model
+    model, training_history = trainer.train_model(train_loader, val_loader, test_loader, hyperparams)
 
-        # Prepare DataFrame with Predictions
-        test_data = data_processor.test_data.copy()
-        test_data.reset_index(drop=True, inplace=True)
-        test_data['lstm_prediction'] = predictions
+    # Clean up
+    cleanup(use_distributed)
 
-        # Calculate OOS R-squared
-        yreal = test_data[target_variable]
-        ypred = test_data['lstm_prediction']
-        r2_lstm = calculate_oos_r2(yreal.values, ypred)
-        logger.info(f"{target_variable} LSTM OOS R2: {r2_lstm:.4f}")
+def main():
+    world_size = torch.cuda.device_count()
+    use_distributed = Config.USE_DISTRIBUTED and world_size > 1
+    if use_distributed:
+        mp.spawn(main_worker,
+                 args=(world_size, Config, use_distributed),
+                 nprocs=world_size,
+                 join=True)
+    else:
+        main_worker(0, 1, Config, use_distributed)
 
-        # Save LSTM predictions
-        output_filename = 'lstm_predictions.csv'
-        save_csv(test_data, Config.OUT_DIR, output_filename)
-
-    except KeyboardInterrupt:
-        logger.info("Process interrupted by user. Cleaning up...")
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        logger.error(traceback.format_exc())
-    finally:
-        logger.info("Process finished.")
-        clear_gpu_memory()
-
-if __name__ == "__main__":
-    try:
-        main()
-        # main_Regression()
-    except KeyboardInterrupt:
-        print("\nProcess interrupted by user. Cleaning up...")
-    finally:
-        print("Process finished.")
+if __name__ == '__main__':
+    main()
+     # main_Regression()

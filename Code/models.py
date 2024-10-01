@@ -8,47 +8,10 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
 from sklearn.model_selection import cross_val_score
+from joblib import Parallel, delayed
 
 from utils import get_logger
 from config import Config
-
-class SequenceDataset(Dataset):
-    """
-    Custom Dataset for sequence data used in LSTM models.
-    """
-    def __init__(self, data, seq_length, feature_cols, target_col):
-        self.seq_length = seq_length
-        self.feature_cols = feature_cols
-        self.target_col = target_col
-
-        # Store only indices instead of actual data
-        self.data = data.sort_values(['permno', 'date']).reset_index(drop=True)
-        self.permno_array = self.data['permno'].values
-
-        # Precompute group indices to avoid recalculating
-        self.indices = self._create_indices()
-
-    def _create_indices(self):
-        indices = []
-        permno_groups = self.data.groupby('permno')
-
-        for _, group in permno_groups:
-            group_length = len(group)
-            if group_length >= self.seq_length:
-                for i in range(group_length - self.seq_length + 1):
-                    indices.append((group.index[i], group.index[i + self.seq_length - 1]))
-
-        return indices
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        start_idx, end_idx = self.indices[idx]
-        seq_data = self.data.loc[start_idx:end_idx]
-        seq = seq_data[self.feature_cols].values.astype(np.float32)
-        target = seq_data[self.target_col].values[-1].astype(np.float32)
-        return torch.from_numpy(seq), torch.tensor(target)
 
 class RegressionModels:
     """
@@ -135,7 +98,7 @@ class RegressionModels:
                 return -scores.mean()
             
             study = optuna.create_study(direction='minimize')
-            study.optimize(objective, n_trials=n_trials)
+            study.optimize(objective, n_trials=n_trials, n_jobs=-1)  # Use all available cores
             
             best_params = study.best_params
             self.logger.info(f"Lasso best hyperparameters: {best_params}")

@@ -10,21 +10,27 @@ class Config:
     DATA_INPUT_DIR = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
     FULL_DATA_PATH = os.path.join(DATA_INPUT_DIR, "hackathon_sample_v2.csv")
 
+    # Add the following lines
+    # Distributed training settings
+    GPUS_PER_NODE = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    WORLD_SIZE = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    USE_DISTRIBUTED = WORLD_SIZE > 1
+
     # Data processing settings
     TARGET_VARIABLE = 'stock_exret'
     STANDARDIZE = True
-    MIN_SEQUENCE_LENGTH = 10
+    MIN_SEQUENCE_LENGTH = 5
 
     # Training settings
     NUM_EPOCHS = 1000
     BATCH_SIZE = 512
     LEARNING_RATE = 0.001
-    ACCUMULATION_STEPS = 1
+    ACCUMULATION_STEPS = 1 # Up 
     CLIP_GRAD_NORM = 1.0
     USE_ALL_DATA = True
     NUM_WORKERS = 2  # CHANGE TO 4 or 8 WHEN TESTING
 
-    # LSTM hyperparameters
+    # LSTM hyperparameters 
     LSTM_PARAMS = {
         'hidden_size': 128,
         'num_layers': 2,
