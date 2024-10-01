@@ -42,19 +42,21 @@ def main_Regression():
 
         # Hyperparameter tuning and training
         logger.info("Starting hyperparameter optimization for Lasso...")
-        reg_models.optimize_lasso_hyperparameters(X_train, Y_train_dm)
+        reg_models.optimize_lasso_hyperparameters(X_train, Y_train_dm, n_trials=100)
         logger.info("Lasso hyperparameter optimization completed.")
 
         logger.info("Starting hyperparameter optimization for Ridge...")
-        reg_models.optimize_ridge_hyperparameters(X_train, Y_train_dm)
+        reg_models.optimize_ridge_hyperparameters(X_train, Y_train_dm, n_trials=100)
         logger.info("Ridge hyperparameter optimization completed.")
 
         logger.info("Starting hyperparameter optimization for ElasticNet...")
-        reg_models.optimize_elastic_net_hyperparameters(X_train, Y_train_dm)
+        reg_models.optimize_elastic_net_hyperparameters(X_train, Y_train_dm, n_trials=100)
         logger.info("ElasticNet hyperparameter optimization completed.")
 
         # Train Linear Regression (no hyperparameters)
         reg_models.train_linear_regression(X_train, Y_train_dm)
+        reg_models.save_model('linear_regression', reg_models.models['linear_regression'])
+        reg_models.save_hyperparams('linear_regression', {'fit_intercept': False})
 
         # Generate predictions
         reg_models.predict(X_test)
@@ -159,6 +161,7 @@ def main():
             f"Starting final LSTM model training for {target_variable} "
             f"with hyperparameters: {best_hyperparams}"
         )
+        best_hyperparams['num_epochs'] = Config.NUM_EPOCHS  # Use the number of epochs from the config file
         model, training_history = lstm_trainer.train_model(
             data_processor.train_data,
             data_processor.val_data,
@@ -223,7 +226,6 @@ def main():
     finally:
         logger.info("Process finished.")
         clear_gpu_memory()
-        logger.info("Training run completed.")
 
 if __name__ == "__main__":
     try:

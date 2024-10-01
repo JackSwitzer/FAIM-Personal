@@ -299,6 +299,21 @@ class LSTMTrainer:
     def _save_final_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
         """Save the final state of training."""
         try:
+            # Convert numpy.int64 to int
+            def convert_to_native(obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_to_native(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_native(i) for i in obj]
+                else:
+                    return obj
+
             # Save the final model state
             final_model_path = os.path.join(self.model_weights_dir, 'final_model.pth')
             torch.save(model.state_dict(), final_model_path)
@@ -311,7 +326,7 @@ class LSTMTrainer:
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
                 'best_val_loss': best_val_loss,
-                'hyperparams': hyperparams
+                'hyperparams': convert_to_native(hyperparams)
             }
             final_checkpoint_path = os.path.join(self.model_weights_dir, 'final_checkpoint.pth')
             torch.save(final_checkpoint, final_checkpoint_path)

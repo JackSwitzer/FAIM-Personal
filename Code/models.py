@@ -1,4 +1,6 @@
 import numpy as np
+import datetime
+import traceback
 import os
 import torch
 import optuna
@@ -112,67 +114,114 @@ class RegressionModels:
         # Save hyperparameters
         self.save_hyperparams('elastic_net', hyperparams)
     
-    def optimize_lasso_hyperparameters(self, X_train, Y_train_dm, n_trials=50):
+    def save_model(self, model_name, model):
+        """Save the trained model to a unique file."""
+        import joblib
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = os.path.join(self.out_dir, f"{model_name}_{timestamp}.joblib")
+            joblib.dump(model, file_path)
+            self.logger.info(f"Model '{model_name}' saved to: {file_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save model '{model_name}': {str(e)}")
+    
+    def save_hyperparams(self, model_name, hyperparams):
+        """Save hyperparameters to a JSON file with a unique name."""
+        import json
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_path = os.path.join(self.out_dir, f"{model_name}_hyperparams_{timestamp}.json")
+            with open(file_path, 'w') as f:
+                json.dump(hyperparams, f, indent=2)
+            self.logger.info(f"Hyperparameters for {model_name} saved to: {file_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save hyperparameters for '{model_name}': {str(e)}")
+    
+    def optimize_lasso_hyperparameters(self, X_train, Y_train_dm, n_trials=100):
         """Optimize Lasso hyperparameters using Optuna."""
-        def objective(trial):
-            alpha = trial.suggest_float('alpha', 1e-5, 1e2, log=True)
-            max_iter = trial.suggest_int('max_iter', 1000, 100000)
-            tol = trial.suggest_float('tol', 1e-5, 1e-1, log=True)
-            lasso = Lasso(fit_intercept=False, alpha=alpha, max_iter=max_iter, tol=tol)
-            scores = cross_val_score(lasso, X_train, Y_train_dm, cv=5,
-                                     scoring='neg_mean_squared_error', n_jobs=-1)
-            return -scores.mean()
-        
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        
-        best_params = study.best_params
-        self.logger.info(f"Lasso best hyperparameters: {best_params}")
-        
-        # Train the model with best hyperparameters
-        self.train_lasso(X_train, Y_train_dm, best_params)
+        try:
+            def objective(trial):
+                alpha = trial.suggest_float('alpha', 1e-6, 1e2, log=True)
+                max_iter = trial.suggest_int('max_iter', 1000, 100000)
+                tol = trial.suggest_float('tol', 1e-6, 1e-1, log=True)
+                lasso = Lasso(fit_intercept=False, alpha=alpha, max_iter=max_iter, tol=tol)
+                scores = cross_val_score(lasso, X_train, Y_train_dm, cv=5,
+                                         scoring='neg_mean_squared_error', n_jobs=-1)
+                return -scores.mean()
+            
+            study = optuna.create_study(direction='minimize')
+            study.optimize(objective, n_trials=n_trials)
+            
+            best_params = study.best_params
+            self.logger.info(f"Lasso best hyperparameters: {best_params}")
+            
+            # Train the model with best hyperparameters
+            self.train_lasso(X_train, Y_train_dm, best_params)
+            
+            # Save model and hyperparameters
+            self.save_model('lasso', self.models['lasso'])
+            self.save_hyperparams('lasso', best_params)
+        except Exception as e:
+            self.logger.error(f"An error occurred during Lasso hyperparameter optimization: {str(e)}")
+            self.logger.error(traceback.format_exc())
     
-    def optimize_ridge_hyperparameters(self, X_train, Y_train_dm, n_trials=50):
+    def optimize_ridge_hyperparameters(self, X_train, Y_train_dm, n_trials=100):
         """Optimize Ridge hyperparameters using Optuna."""
-        def objective(trial):
-            alpha = trial.suggest_float('alpha', 1e-5, 1e5, log=True)
-            max_iter = trial.suggest_int('max_iter', 1000, 100000)
-            tol = trial.suggest_float('tol', 1e-5, 1e-1, log=True)
-            ridge = Ridge(fit_intercept=False, alpha=alpha, max_iter=max_iter, tol=tol)
-            scores = cross_val_score(ridge, X_train, Y_train_dm, cv=5,
-                                     scoring='neg_mean_squared_error', n_jobs=-1)
-            return -scores.mean()
-        
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        
-        best_params = study.best_params
-        self.logger.info(f"Ridge best hyperparameters: {best_params}")
-        
-        # Train the model with best hyperparameters
-        self.train_ridge(X_train, Y_train_dm, best_params)
+        try:
+            def objective(trial):
+                alpha = trial.suggest_float('alpha', 1e-6, 1e5, log=True)
+                max_iter = trial.suggest_int('max_iter', 1000, 100000)
+                tol = trial.suggest_float('tol', 1e-6, 1e-1, log=True)
+                ridge = Ridge(fit_intercept=False, alpha=alpha, max_iter=max_iter, tol=tol)
+                scores = cross_val_score(ridge, X_train, Y_train_dm, cv=5,
+                                         scoring='neg_mean_squared_error', n_jobs=-1)
+                return -scores.mean()
+            
+            study = optuna.create_study(direction='minimize')
+            study.optimize(objective, n_trials=n_trials)
+            
+            best_params = study.best_params
+            self.logger.info(f"Ridge best hyperparameters: {best_params}")
+            
+            # Train the model with best hyperparameters
+            self.train_ridge(X_train, Y_train_dm, best_params)
+            
+            # Save model and hyperparameters
+            self.save_model('ridge', self.models['ridge'])
+            self.save_hyperparams('ridge', best_params)
+        except Exception as e:
+            self.logger.error(f"An error occurred during Ridge hyperparameter optimization: {str(e)}")
+            self.logger.error(traceback.format_exc())
     
-    def optimize_elastic_net_hyperparameters(self, X_train, Y_train_dm, n_trials=50):
+    def optimize_elastic_net_hyperparameters(self, X_train, Y_train_dm, n_trials=100):
         """Optimize ElasticNet hyperparameters using Optuna."""
-        def objective(trial):
-            alpha = trial.suggest_float('alpha', 1e-5, 1e2, log=True)
-            l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
-            max_iter = trial.suggest_int('max_iter', 1000, 100000)
-            tol = trial.suggest_float('tol', 1e-5, 1e-1, log=True)
-            en = ElasticNet(fit_intercept=False, alpha=alpha, l1_ratio=l1_ratio,
-                            max_iter=max_iter, tol=tol)
-            scores = cross_val_score(en, X_train, Y_train_dm, cv=5,
-                                     scoring='neg_mean_squared_error', n_jobs=-1)
-            return -scores.mean()
-        
-        study = optuna.create_study(direction='minimize')
-        study.optimize(objective, n_trials=n_trials)
-        
-        best_params = study.best_params
-        self.logger.info(f"ElasticNet best hyperparameters: {best_params}")
-        
-        # Train the model with best hyperparameters
-        self.train_elastic_net(X_train, Y_train_dm, best_params)
+        try:
+            def objective(trial):
+                alpha = trial.suggest_float('alpha', 1e-6, 1e2, log=True)
+                l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
+                max_iter = trial.suggest_int('max_iter', 1000, 100000)
+                tol = trial.suggest_float('tol', 1e-6, 1e-1, log=True)
+                en = ElasticNet(fit_intercept=False, alpha=alpha, l1_ratio=l1_ratio,
+                                max_iter=max_iter, tol=tol)
+                scores = cross_val_score(en, X_train, Y_train_dm, cv=5,
+                                         scoring='neg_mean_squared_error', n_jobs=-1)
+                return -scores.mean()
+            
+            study = optuna.create_study(direction='minimize')
+            study.optimize(objective, n_trials=n_trials)
+            
+            best_params = study.best_params
+            self.logger.info(f"ElasticNet best hyperparameters: {best_params}")
+            
+            # Train the model with best hyperparameters
+            self.train_elastic_net(X_train, Y_train_dm, best_params)
+            
+            # Save model and hyperparameters
+            self.save_model('elastic_net', self.models['elastic_net'])
+            self.save_hyperparams('elastic_net', best_params)
+        except Exception as e:
+            self.logger.error(f"An error occurred during ElasticNet hyperparameter optimization: {str(e)}")
+            self.logger.error(traceback.format_exc())
     
     def predict(self, X_test):
         """Generate predictions using the trained models."""
@@ -183,14 +232,6 @@ class RegressionModels:
     def get_predictions(self):
         """Retrieve the predictions dictionary."""
         return self.predictions
-    
-    def save_hyperparams(self, model_name, hyperparams):
-        """Save hyperparameters to a JSON file."""
-        import json
-        file_path = os.path.join(self.out_dir, f"{model_name}_hyperparams.json")
-        with open(file_path, 'w') as f:
-            json.dump(hyperparams, f, indent=2)
-        self.logger.info(f"Hyperparameters for {model_name} saved to: {file_path}")
 
 class LSTMModel(nn.Module):
     """
