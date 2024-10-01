@@ -9,21 +9,32 @@ from sklearn.model_selection import cross_val_score
 
 from utils import get_logger
 
-class StockDataset(Dataset):
-    """
-    Custom Dataset for handling stock sequences for LSTM input.
-    Efficiently handles large datasets by utilizing memory mapping.
-    """
-    def __init__(self, sequences, targets):
-        self.logger = get_logger()
-        self.sequences = sequences
-        self.targets = targets
+class SequenceDataset(Dataset):
+    def __init__(self, data, seq_length, feature_cols, target_col):
+        self.data = data.reset_index(drop=True)  # Ensure unique indices
+        self.seq_length = seq_length
+        self.feature_cols = feature_cols
+        self.target_col = target_col
+        self.indices = self._create_indices()
+
+    def _create_indices(self):
+        indices = []
+        grouped = self.data.groupby('permno')
+        for _, group in grouped:
+            group_length = len(group)
+            if group_length >= self.seq_length:
+                indices.extend([(group.index[i], group.index[i+self.seq_length-1]) 
+                                for i in range(group_length - self.seq_length + 1)])
+        return indices
 
     def __len__(self):
-        return len(self.sequences)
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.sequences[idx], self.targets[idx]
+        start_idx, end_idx = self.indices[idx]
+        seq = self.data.loc[start_idx:end_idx, self.feature_cols].values
+        target = self.data.loc[end_idx, self.target_col]
+        return torch.tensor(seq, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)
 
 class RegressionModels:
     """

@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from multiprocessing import Pool
+from itertools import chain
 
 from utils import get_logger
 
@@ -35,15 +36,18 @@ class DataProcessor:
         self.logger.info("Data types optimized to reduce memory usage.")
 
     def _optimize_data_types(self):
-      """Optimize data types to reduce memory usage."""
-      # Convert 'permno' to int64
-      self.stock_data['permno'] = pd.to_numeric(self.stock_data['permno'], downcast='integer').astype(np.int64)
-      # Downcast other numeric columns
-      for col in self.stock_data.select_dtypes(include=['float64']).columns:
-          self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='float')
-      for col in self.stock_data.select_dtypes(include=['int64']).columns:
-          if col != 'permno':  # 'permno' is already handled
-              self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='integer')
+        """Optimize data types to reduce memory usage."""
+        try:
+            # Convert 'permno' to int64
+            self.stock_data['permno'] = pd.to_numeric(self.stock_data['permno'], downcast='integer').astype(np.int64)
+            # Downcast other numeric columns
+            for col in self.stock_data.select_dtypes(include=['float64']).columns:
+                self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='float')
+            for col in self.stock_data.select_dtypes(include=['int64']).columns:
+                if col != 'permno':  # 'permno' is already handled
+                    self.stock_data[col] = pd.to_numeric(self.stock_data[col], downcast='integer')
+        except Exception as e:
+            self.logger.error(f"Error optimizing data types: {e}")
 
     def preprocess_data(self):
         """Preprocess the data: handle missing values, select features, and standardize if needed."""
@@ -64,23 +68,31 @@ class DataProcessor:
             self.logger.info("Data standardized.")
             # Cast to float32
             self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
+        
+        # Check for missing values in the target variable
+        if self.stock_data[self.ret_var].isnull().any():
+            self.logger.warning(f"Missing values found in target variable '{self.ret_var}'. Filling with 0.")
+            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].fillna(0).astype('float32')
+        else:
+            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
 
         self.logger.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
         if self.ret_var not in self.stock_data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
 
-    def split_data(self, train_pct=None, val_pct=None, test_pct=None):
+    def split_data(self, train_pct=0.8, val_pct=0.1, test_pct=0.1):
         """Split data into training, validation, and test sets."""
-        if train_pct is None and val_pct is None and test_pct is None:
-            # Time-based splitting
-            self.train_data, self.val_data, self.test_data = self._time_based_split()
-        else:
-            # Percentage-based splitting
-            self.train_data, self.val_data, self.test_data = self._percentage_based_split(train_pct, val_pct, test_pct)
-        # Reset indices after splitting
-        self.train_data.reset_index(drop=True, inplace=True)
-        self.val_data.reset_index(drop=True, inplace=True)
-        self.test_data.reset_index(drop=True, inplace=True)
+        if train_pct + val_pct + test_pct != 1.0:
+            self.logger.warning("Split percentages do not sum to 1. Using default values.")
+            train_pct, val_pct, test_pct = 0.8, 0.1, 0.1
+
+        self.train_data, self.val_data, self.test_data = self._time_based_split(train_pct, val_pct, test_pct)
+        
+        # Reset indices after splitting and ensure they are unique
+        self.train_data = self.train_data.reset_index(drop=True)
+        self.val_data = self.val_data.reset_index(drop=True)
+        self.test_data = self.test_data.reset_index(drop=True)
+        
         # Add logging to verify data splits
         self.logger.info(f"Data split completed.")
         self.logger.info(f"Train data size: {len(self.train_data)}, Validation data size: {len(self.val_data)}, Test data size: {len(self.test_data)}")
@@ -88,10 +100,10 @@ class DataProcessor:
         self.logger.info(f"Number of unique 'permno' in validation data: {self.val_data['permno'].nunique()}")
         self.logger.info(f"Number of unique 'permno' in test data: {self.test_data['permno'].nunique()}")
 
-    def _time_based_split(self):
+    def _time_based_split(self, train_pct, val_pct, test_pct):
         """Split data based on predefined time periods."""
         data = self.stock_data.copy()
-        data.sort_values('date', inplace=True)
+        data.sort_values(['permno', 'date'], inplace=True)
 
         # Get the minimum and maximum dates
         min_date = data['date'].min()
@@ -101,40 +113,30 @@ class DataProcessor:
         # Calculate the total time span
         total_span = (max_date - min_date).days
 
-        # Define the split ratios
-        train_ratio = 0.8
-        val_ratio = 0.1
-        test_ratio = 0.1
-
         # Calculate split dates
-        train_days = int(total_span * train_ratio)
-        val_days = int(total_span * val_ratio)
+        train_days = int(total_span * train_pct)
+        val_days = int(total_span * val_pct)
 
         train_end_date = min_date + pd.Timedelta(days=train_days)
         val_end_date = train_end_date + pd.Timedelta(days=val_days)
+
+        # Adjust dates to actual available dates
+        train_end_date = data[data['date'] >= train_end_date].iloc[0]['date']
+        val_end_date = data[data['date'] >= val_end_date].iloc[0]['date']
 
         self.logger.info(f"Train date range: {min_date.date()} to {train_end_date.date()}")
         self.logger.info(f"Validation date range: {train_end_date.date()} to {val_end_date.date()}")
         self.logger.info(f"Test date range: {val_end_date.date()} to {max_date.date()}")
 
         # Split the data
-        train_data = data[data['date'] < train_end_date]
-        val_data = data[(data['date'] >= train_end_date) & (data['date'] < val_end_date)]
-        test_data = data[data['date'] >= val_end_date]
+        train_data = data[data['date'] < train_end_date].copy()
+        val_data = data[(data['date'] >= train_end_date) & (data['date'] < val_end_date)].copy()
+        test_data = data[data['date'] >= val_end_date].copy()
 
-        return train_data, val_data, test_data
-
-    def _percentage_based_split(self, train_pct, val_pct, test_pct):
-        """Split data based on specified percentages."""
-        data = self.stock_data.copy()
-        data.sort_values('date', inplace=True)
-        total_len = len(data)
-        train_end = int(train_pct * total_len)
-        val_end = train_end + int(val_pct * total_len)
-
-        train_data = data.iloc[:train_end]
-        val_data = data.iloc[train_end:val_end]
-        test_data = data.iloc[val_end:]
+        # Reset index for each split to ensure unique indices
+        train_data.reset_index(drop=True, inplace=True)
+        val_data.reset_index(drop=True, inplace=True)
+        test_data.reset_index(drop=True, inplace=True)
 
         return train_data, val_data, test_data
 
@@ -151,18 +153,43 @@ class DataProcessor:
 
         return X_train, Y_train, X_val, Y_val, X_test, Y_test
 
-    def parallel_create_sequences(self, data, seq_length, num_processes=4):
+    def create_sequences(self, data, seq_length):
+        """
+        Create sequences of data for LSTM input using a generator.
+        """
+        self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
+        if self.ret_var not in data.columns:
+            self.logger.error(f"Target column '{self.ret_var}' not found in the data for sequence creation.")
+            return
+        
+        data = data.sort_values(['permno', 'date'])
+        grouped = data.groupby('permno')
+
+        for permno, group in grouped:
+            group_length = len(group)
+            if group_length < seq_length:
+                self.logger.debug(f"Skipping 'permno' {permno} due to insufficient data. Group size: {group_length}")
+                continue
+            group_X = group[self.feature_cols].values
+            group_Y = group[self.ret_var].values
+            group_indices = group.index.values
+            for i in range(group_length - seq_length + 1):
+                seq = group_X[i:i+seq_length]
+                target = group_Y[i+seq_length-1]
+                target_index = group_indices[i+seq_length-1]
+                yield seq, target, target_index
+            
+            # Handle the case where group_length == seq_length
+            if group_length == seq_length:
+                seq = group_X
+                target = group_Y[-1]
+                target_index = group_indices[-1]
+                yield seq, target, target_index
+
+    def parallel_create_sequences(self, data, seq_length, num_processes=None):
         with Pool(num_processes) as pool:
             chunks = np.array_split(data, num_processes)
             results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
         
-        # Update this line
-        sequences = np.concatenate([r[0] for r in results if r[0] is not None])
-        targets = np.concatenate([r[1] for r in results if r[1] is not None])
-        indices = np.concatenate([r[2] for r in results if r[2] is not None])
-        
-        # Use transpose() instead of swapaxes()
-        if sequences.ndim == 3:
-            sequences = sequences.transpose(0, 2, 1)
-        
-        return sequences, targets, indices
+        # Chain the generators from all processes
+        return chain.from_iterable(results)

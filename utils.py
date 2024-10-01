@@ -75,14 +75,16 @@ def clear_import_cache():
             importlib.reload(sys.modules[module])
     logger.info("Python import cache cleared.")
 
-def check_cuda():
-    """Check if CUDA is available and return the appropriate device."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def check_device():
     if torch.cuda.is_available():
-        logger.info(f"CUDA is available. GPU: {torch.cuda.get_device_name(0)}")
+        device = torch.device("cuda")
+        logger.info(f"Using CUDA. GPU: {torch.cuda.get_device_name(0)}")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        logger.info("Using MPS (Metal Performance Shaders) on macOS.")
     else:
-        logger.info("CUDA is not available. Using CPU.")
-    logger.info(f"PyTorch version: {torch.__version__}")
+        device = torch.device("cpu")
+        logger.info("Using CPU.")
     return device
 
 def log_gpu_memory_usage():
@@ -104,6 +106,7 @@ def check_torch_version():
     current_version = torch.__version__
     if version.parse(current_version) < version.parse(required_version):
         logger.warning(f"PyTorch version {current_version} is older than the recommended version {required_version}. Some features may not work as expected.")
+    logger.info(f"Using PyTorch version: {current_version}")
 
 def log_memory_usage():
     import psutil

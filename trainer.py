@@ -1,5 +1,6 @@
 import os
 import datetime
+import shutil
 import json
 import numpy as np
 import multiprocessing
@@ -8,41 +9,41 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset, IterableDataset, Dataset
+from torch.amp import GradScaler, autocast
 
 import pandas as pd
 import optuna
 from tqdm import tqdm
 
-from models import LSTMModel, StockDataset
+from models import LSTMModel, SequenceDataset
 from utils import get_logger
 
 class LSTMTrainer:
     """
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
-    def __init__(self, feature_cols, target_col, device, out_dir="./Data Output/"):
+    def __init__(self, feature_cols, target_col, device, out_dir="./Data Output/", model_weights_dir=None):
         self.logger = get_logger()
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.logger.info(f"Target column set to: {self.target_col}")
         self.device = device
         self.out_dir = out_dir
+        self.model_weights_dir = model_weights_dir if model_weights_dir else os.path.join(out_dir, "model_weights")
         self.best_hyperparams = None  # To store the best hyperparameters
         os.makedirs(self.out_dir, exist_ok=True)  # Ensure output directory exists
+        os.makedirs(self.model_weights_dir, exist_ok=True)  # Ensure model weights directory exists
 
     def create_sequences(self, data, seq_length):
         """
-        Create sequences of data for LSTM input.
+        Create sequences of data for LSTM input using a generator.
         """
         self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
         if self.target_col not in data.columns:
             self.logger.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
-            return None, None, None  # Return early if target column is missing
+            return
         
-        sequences = []
-        targets = []
-        indices = []
         data = data.sort_values(['permno', 'date'])
         grouped = data.groupby('permno')
 
@@ -58,70 +59,34 @@ class LSTMTrainer:
                 seq = group_X[i:i+seq_length]
                 target = group_Y[i+seq_length-1]
                 target_index = group_indices[i+seq_length-1]
-                sequences.append(seq)
-                targets.append(target)
-                indices.append(target_index)
+                yield seq, target, target_index
 
-        if not sequences:
-            self.logger.warning("No valid sequences created.")
-            return None, None, None
+    def _create_dataloader(self, data, seq_length, batch_size, num_workers=4, shuffle=False):
+        # Ensure data has unique indices
+        data = data.reset_index(drop=True)
+        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, 
+                          num_workers=num_workers, pin_memory=True)
 
-        return np.array(sequences), np.array(targets), np.array(indices)
-
-    def parallel_create_sequences(self, data, seq_length, num_processes=None):
-        """
-        Create sequences in parallel using multiprocessing.
-        """
-        if num_processes is None:
-            num_processes = max(1, multiprocessing.cpu_count() - 1)
-
-        # Split the data into chunks for each process
-        data_chunks = np.array_split(data, num_processes)
-
-        # Create a partial function with fixed seq_length
-        partial_create_sequences = partial(self.create_sequences, seq_length=seq_length)
-
-        # Use multiprocessing to create sequences in parallel
-        with multiprocessing.Pool(processes=num_processes) as pool:
-            results = pool.map(partial_create_sequences, data_chunks)
-
-        # Combine the results, handling empty results
-        sequences = [r[0] for r in results if r[0] is not None and len(r[0]) > 0]
-        targets = [r[1] for r in results if r[1] is not None and len(r[1]) > 0]
-        indices = [r[2] for r in results if r[2] is not None and len(r[2]) > 0]
-
-        if not sequences or not targets or not indices:
-            self.logger.warning("No valid sequences created in parallel execution.")
-            return None, None, None
-
-        self.logger.info(f"Sequences created in parallel. Total sequences: {sum(len(s) for s in sequences)}")
-        return np.concatenate(sequences), np.concatenate(targets), np.concatenate(indices)
-
-    def _create_dataloader(self, X, Y, batch_size, shuffle=False):
-        """Create DataLoader from sequences and targets."""
-        dataset = StockDataset(torch.tensor(X, dtype=torch.float32), torch.tensor(Y, dtype=torch.float32))
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=os.cpu_count(),
-            pin_memory=True
-        )
-
-    def train_model(self, train_loader, val_loader, hyperparams):
+    def train_model(self, train_data, val_data, test_data, hyperparams):
         """
         Train the LSTM model with specified hyperparameters.
 
         Args:
             train_loader (DataLoader): DataLoader for training data.
             val_loader (DataLoader): DataLoader for validation data.
+            test_loader (DataLoader): DataLoader for test data.
             hyperparams (dict): Dictionary containing hyperparameters.
 
         Returns:
             model (nn.Module): Trained model.
             best_val_loss (float): Best validation loss achieved.
         """
+        self.logger.info(f"Starting training with hyperparameters: {hyperparams}")
+        self.logger.info(f"Training on device: {self.device}")
         # Extract hyperparameters
+        seq_length = hyperparams['seq_length']
+        batch_size = hyperparams['batch_size']
         num_layers = hyperparams['num_layers']
         dropout_rate = hyperparams['dropout_rate']
         hidden_size = hyperparams['hidden_size']
@@ -176,64 +141,48 @@ class LSTMTrainer:
         # Initialize variables
         train_losses = []
         val_losses = []
+        test_losses = []
         best_model_state = None
 
         # Load checkpoint if available
-        try:
-            # Load checkpoint if it exists
-            model, optimizer, scheduler, start_epoch, best_val_loss, loaded_hyperparams = self.load_checkpoint(
-                model, optimizer, scheduler
-            )
-            # Merge loaded hyperparams with current hyperparams
-            hyperparams.update(loaded_hyperparams)
-        except ValueError as e:
-            self.logger.error(f"Error loading checkpoint: {str(e)}")
-            self.logger.info("Starting training from scratch.")
-            start_epoch = 1
-            best_val_loss = float('inf')
+        model, optimizer, scheduler, start_epoch, best_val_loss, loaded_hyperparams = self.load_checkpoint(
+            model, optimizer, scheduler
+        )
+        
+        # Check if loaded hyperparams match current hyperparams
+        if loaded_hyperparams and loaded_hyperparams != hyperparams:
+            self.logger.warning("Loaded hyperparameters do not match current hyperparameters. "
+                                "Using loaded hyperparameters for consistency.")
+            hyperparams = loaded_hyperparams
 
         # Gradient accumulation setup
         if accumulation_steps < 1:
             accumulation_steps = 1
         self.logger.info(f"Using gradient accumulation with {accumulation_steps} steps")
         
+        train_loader = self._create_dataloader(train_data, seq_length, batch_size, shuffle=True)
+        val_loader = self._create_dataloader(val_data, seq_length, batch_size) if val_data is not None else None
+        test_loader = self._create_dataloader(test_data, seq_length, batch_size)
+        
         try:
             for epoch in range(start_epoch, num_epochs + 1):
-                start_time = datetime.datetime.now()
-                model.train()
-                optimizer.zero_grad()
-                running_loss = 0.0
-                for batch_idx, (batch_X, batch_Y) in enumerate(train_loader):
-                    batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
-                    outputs = model(batch_X).squeeze(-1)
-                    loss = criterion(outputs, batch_Y)
-                    loss = loss / accumulation_steps
-                    loss.backward()
-                    running_loss += loss.item()
-
-                    if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
-                        if clip_grad_norm:
-                            nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-                        optimizer.step()
-                        optimizer.zero_grad()
-
-                # Calculate average training loss
-                train_loss = running_loss * accumulation_steps / len(train_loader)
-                epoch_duration = datetime.datetime.now() - start_time
-                self.logger.info(f"Epoch {epoch}/{num_epochs}, Train Loss: {train_loss:.4f}, Duration: {epoch_duration}")
+                train_loss = self._train_epoch(model, train_loader, criterion, optimizer, clip_grad_norm)
                 train_losses.append(train_loss)
 
-                if val_loader is not None:
-                    val_loss = self._evaluate(model, val_loader, criterion)
+                # Log validation loss if val_loader is available
+                if val_data is not None:
+                    val_loss = 0.0
+                    with torch.no_grad():
+                        for batch_loader in self._create_dataloader(val_data, seq_length, batch_size):
+                            for batch_X, batch_Y in batch_loader:
+                                batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+                                outputs = model(batch_X).squeeze(-1)
+                                val_loss += criterion(outputs, batch_Y).item()
+
+                    # Calculate average validation loss
+                    val_loss = val_loss / len(val_data)
                     self.logger.info(f"Epoch {epoch}/{num_epochs}, Validation Loss: {val_loss:.4f}")
                     val_losses.append(val_loss)
-
-                    # Update scheduler and save best model
-                    if scheduler:
-                        scheduler.step(val_loss)
-                        # Log the current learning rate
-                        current_lr = scheduler.optimizer.param_groups[0]['lr']
-                        self.logger.info(f"Current learning rate: {current_lr:.6f}")
 
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -241,39 +190,49 @@ class LSTMTrainer:
                         best_optimizer_state = optimizer.state_dict()
                         best_scheduler_state = scheduler.state_dict() if scheduler else None
 
-                        # Save checkpoint
-                        checkpoint = {
-                            'epoch': epoch,
-                            'model_state_dict': best_model_state,
-                            'optimizer_state_dict': best_optimizer_state,
-                            'scheduler_state_dict': best_scheduler_state,
-                            'best_val_loss': best_val_loss,
-                            'hyperparams': hyperparams
-                        }
-                        torch.save(checkpoint, os.path.join(self.out_dir, 'best_checkpoint.pth'))
-                        self.logger.info(f"Checkpoint saved at epoch {epoch} with validation loss: {best_val_loss:.4f}")
-                else:
-                    # Save model periodically even without validation
-                    if epoch % 10 == 0:
-                        checkpoint = {
-                            'epoch': epoch,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                            'hyperparams': hyperparams
-                        }
-                        torch.save(checkpoint, os.path.join(self.out_dir, f'checkpoint_epoch_{epoch}.pth'))
-                        self.logger.info(f"Checkpoint saved at epoch {epoch}")
+                # Log test loss and save checkpoint every 10 epochs
+                if epoch % 10 == 0:
+                    test_loss = 0.0
+                    with torch.no_grad():
+                        for batch_loader in self._create_dataloader(test_data, seq_length, batch_size):
+                            for batch_X, batch_Y in batch_loader:
+                                batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+                                outputs = model(batch_X).squeeze(-1)
+                                test_loss += criterion(outputs, batch_Y).item()
+
+                    # Calculate average test loss
+                    test_loss = test_loss / len(test_data)
+                    self.logger.info(f"Epoch {epoch}/{num_epochs}, Test Loss: {test_loss:.4f}")
+                    test_losses.append(test_loss)
+
+                    # Save checkpoint
+                    is_best = val_loss < best_val_loss
+                    state = {
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                        'best_val_loss': best_val_loss if val_data is not None else None,
+                        'hyperparams': hyperparams
+                    }
+                    self.save_checkpoint(state, is_best, filename=f'checkpoint_epoch_{epoch}.pth')
+
+                # Update scheduler if it exists
+                if scheduler:
+                    if val_data is not None:
+                        scheduler.step(val_loss)
+                    else:
+                        scheduler.step(train_loss)
 
             # Save training metrics
-            self.save_training_metrics(train_losses, val_losses)
+            self.save_training_metrics(train_losses, val_losses, test_losses)
 
             # Load the best model state if available
             if best_model_state:
                 model.load_state_dict(best_model_state)
                 self.logger.info("Loaded best model state.")
 
-            return model, best_val_loss if val_loader is not None else None
+            return model, best_val_loss if val_data is not None else None
         except KeyboardInterrupt:
             self.logger.info("Training interrupted by user. Saving current model state...")
             # Save checkpoint
@@ -285,7 +244,8 @@ class LSTMTrainer:
                 'best_val_loss': best_val_loss,
                 'hyperparams': hyperparams
             }
-            torch.save(checkpoint, os.path.join(self.out_dir, 'interrupted_checkpoint.pth'))
+            checkpoint_path = os.path.join(self.model_weights_dir, 'interrupted_checkpoint.pth')
+            torch.save(checkpoint, checkpoint_path)
             self.logger.info(f"Checkpoint saved at epoch {epoch}. Training can be resumed later.")
             raise  # Re-raise the exception to exit
 
@@ -342,18 +302,8 @@ class LSTMTrainer:
                 'accumulation_steps': accumulation_steps
             }
 
-            # Create sequences and dataloaders
-            X_train, Y_train, _ = self.create_sequences(train_data, seq_length)
-            X_val, Y_val, _ = self.create_sequences(val_data, seq_length)
-
-            if len(X_train) == 0 or len(X_val) == 0:
-                return float('inf')  # Skip this trial
-
-            train_loader = self._create_dataloader(X_train, Y_train, batch_size)
-            val_loader = self._create_dataloader(X_val, Y_val, batch_size)
-
             # Train the model
-            model, val_loss = self.train_model(train_loader, val_loader, hyperparams)
+            model, val_loss = self.train_model(train_data, val_data, hyperparams)
 
             return val_loss
 
@@ -391,36 +341,47 @@ class LSTMTrainer:
             json.dump(hyperparams, f, indent=2)
         self.logger.info(f"Hyperparameters saved to: {file_path}")
 
-    def load_checkpoint(self, model, optimizer, scheduler=None, filename='best_checkpoint.pth'):
-        checkpoint_path = os.path.join(self.out_dir, filename)
-        if os.path.exists(checkpoint_path):
-            try:
-                # Add weights_only=True
-                checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
-                model.load_state_dict(checkpoint['model_state_dict'])
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                if scheduler and checkpoint.get('scheduler_state_dict'):
-                    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-                start_epoch = checkpoint['epoch'] + 1
-                best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-                hyperparams = checkpoint.get('hyperparams', {})
-                self.logger.info(f"Resuming from checkpoint at epoch {start_epoch - 1}")
-                return model, optimizer, scheduler, start_epoch, best_val_loss, hyperparams
-            except Exception as e:
-                self.logger.error(f"Error loading checkpoint: {str(e)}")
-        
-        # Check for interrupted checkpoint
-        interrupted_checkpoint_path = os.path.join(self.out_dir, 'interrupted_checkpoint.pth')
-        if os.path.exists(interrupted_checkpoint_path):
-            return self.load_checkpoint(model, optimizer, scheduler, 'interrupted_checkpoint.pth')
-        
-        self.logger.info("No valid checkpoint found, starting from scratch.")
-        return model, optimizer, scheduler, 1, float('inf'), {}
+    def load_checkpoint(self, model, optimizer, scheduler=None):
+        """
+        Load the latest checkpoint if it exists and handle exceptions due to mismatched shapes.
+        """
+        checkpoint_files = [f for f in os.listdir(self.model_weights_dir) if f.endswith('.pth')]
+        if not checkpoint_files:
+            self.logger.info("No checkpoints found. Starting training from scratch.")
+            return model, optimizer, scheduler, 1, float('inf'), {}
 
-    def save_training_metrics(self, train_losses, val_losses):
+        latest_checkpoint = max(checkpoint_files, key=lambda f: os.path.getmtime(os.path.join(self.model_weights_dir, f)))
+        checkpoint_path = os.path.join(self.model_weights_dir, latest_checkpoint)
+
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            if scheduler and 'scheduler_state_dict' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint['epoch'] + 1
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            hyperparams = checkpoint.get('hyperparams', {})
+            self.logger.info(f"Resuming from checkpoint at epoch {start_epoch - 1}")
+            return model, optimizer, scheduler, start_epoch, best_val_loss, hyperparams
+        except Exception as e:
+            self.logger.error(f"Error loading checkpoint: {str(e)}")
+            self.logger.info("Starting training from scratch.")
+            return model, optimizer, scheduler, 1, float('inf'), {}
+
+    def save_checkpoint(self, state, is_best=False, filename='checkpoint.pth.tar'):
+        save_path = os.path.join(self.model_weights_dir, filename)
+        torch.save(state, save_path)
+        if is_best:
+            best_path = os.path.join(self.model_weights_dir, 'model_best.pth.tar')
+            shutil.copyfile(save_path, best_path)
+        self.logger.info(f"Checkpoint saved to {save_path}")
+
+    def save_training_metrics(self, train_losses, val_losses, test_losses):
         metrics = {
             'train_losses': train_losses,
-            'val_losses': val_losses
+            'val_losses': val_losses,
+            'test_losses': test_losses
         }
         with open(os.path.join(self.out_dir, 'training_metrics.json'), 'w') as f:
             json.dump(metrics, f)
@@ -430,20 +391,28 @@ class LSTMTrainer:
         """Train the model for one epoch."""
         model.train()
         total_loss = 0.0
-        total_samples = 0
+        scaler = GradScaler()  # Remove the device_type argument
         for batch_X, batch_Y in dataloader:
             batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
-            optimizer.zero_grad()
-            outputs = model(batch_X).squeeze(-1)
-            loss = criterion(outputs, batch_Y)
-            loss.backward()
+            optimizer.zero_grad(set_to_none=True)
+            
+            with autocast(device_type=self.device.type, dtype=torch.float16):
+                outputs = model(batch_X).squeeze(-1)
+                loss = criterion(outputs, batch_Y)
+            
+            scaler.scale(loss).backward()
+            
             if clip_grad_norm:
-                nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-            optimizer.step()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            
+            scaler.step(optimizer)
+            scaler.update()
+            
             batch_size = batch_Y.size(0)
             total_loss += loss.item() * batch_size
-            total_samples += batch_size
-        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+        
+        avg_loss = total_loss / len(dataloader.dataset)
         return avg_loss
 
     def _evaluate(self, model, dataloader, criterion, return_predictions=False):

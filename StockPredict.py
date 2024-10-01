@@ -83,42 +83,49 @@ def main_Regression():
         # Cleanup
         logger.info("Regression run completed.")
 
-
 def main():
     out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
-    os.makedirs(out_dir, exist_ok=True)
+    model_weights_dir = os.path.join(out_dir, "model_weights")
+    os.makedirs(model_weights_dir, exist_ok=True)
     setup_logging(out_dir)
     logger = get_logger()
 
     set_seed()
+    clear_gpu_memory()
+    check_torch_version()
+    device = check_device()
+    data_input_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
+    full_data_path = os.path.join(data_input_dir, "hackathon_sample_v2.csv")
+
+    target_variable = 'stock_exret'
+    logger.info(f"Target variable set to: {target_variable}")
+
     try:
-        clear_gpu_memory()
-        check_torch_version()
-        device = check_cuda()
-        data_input_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
-        full_data_path = os.path.join(data_input_dir, "hackathon_sample_v2.csv")
-
-        # Allow for configurable target variable
-        target_variable = 'stock_exret'  # Change this to your desired target, e.g., 'stock_price'
-        logger.info(f"Target variable set to: {target_variable}")
-
         # Data processing
         data_processor = DataProcessor(full_data_path, target_variable, standardize=True)
         data_processor.load_data()
         data_processor.preprocess_data()
         data_processor.split_data()
 
+        # Log group lengths only once
+        min_group_length = min(
+            data_processor.train_data.groupby('permno').size().min(),
+            data_processor.val_data.groupby('permno').size().min(),
+            data_processor.test_data.groupby('permno').size().min()
+        )
+        logger.info(f"Minimum group length across all sets: {min_group_length}")
+
         feature_cols = data_processor.feature_cols
-        logger.info(f"Data processing completed. Number of features: {len(feature_cols)}")
-        logger.info(f"Train set size: {len(data_processor.train_data)}, "
-                    f"Val set size: {len(data_processor.val_data)}, "
-                    f"Test set size: {len(data_processor.test_data)}")
+        logger.info(f"Data processing completed. Features: {len(feature_cols)}, "
+                    f"Train: {len(data_processor.train_data)}, "
+                    f"Val: {len(data_processor.val_data)}, "
+                    f"Test: {len(data_processor.test_data)}")
 
         log_memory_usage()
         log_gpu_memory()
 
         # Initialize LSTM Trainer
-        lstm_trainer = LSTMTrainer(feature_cols, target_variable, device, out_dir=out_dir)
+        lstm_trainer = LSTMTrainer(feature_cols, target_variable, device, out_dir=out_dir, model_weights_dir=model_weights_dir)
 
         # Load best hyperparameters or optimize if not available
         best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
@@ -127,23 +134,19 @@ def main():
             best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
                 data_processor.train_data,
                 data_processor.val_data,
-                n_trials=50
+                n_trials=200
             )
+            if best_hyperparams is None:
+                logger.error("Hyperparameter optimization failed. Exiting.")
+                return
 
         # Adjust sequence length if necessary
-        min_group_length = min(
-            data_processor.train_data.groupby('permno').size().min(),
-            data_processor.val_data.groupby('permno').size().min(),
-            data_processor.test_data.groupby('permno').size().min()
-        )
-
         if best_hyperparams['seq_length'] > min_group_length:
             best_hyperparams['seq_length'] = min_group_length
             logger.info(f"Adjusted sequence length to: {best_hyperparams['seq_length']} due to minimum group length.")
 
-        # After hyperparameter tuning, use all data for final training if desired
-        use_all_data = True  # Set this to False if you don't want to retrain on all data
-
+        # Make use_all_data configurable
+        use_all_data = True  # Set this based on your requirements
         if use_all_data:
             logger.info("Using train and validation data for final training...")
             # Combine train and val data
@@ -151,82 +154,30 @@ def main():
             data_processor.train_data = all_train_data
             data_processor.val_data = None  # No validation during final training
             # Test data remains the same for evaluation
-
-            # Recreate sequences with the combined data
-            X_train, Y_train, _ = lstm_trainer.parallel_create_sequences(
-                data_processor.train_data, best_hyperparams['seq_length']
-            )
-            logger.info(f"Sequences created for full data training. Train: {X_train.shape if X_train is not None else 'Empty'}")
-
-            # Check if we have valid sequences before proceeding
-            if X_train is None:
-                logger.error("Unable to create valid sequences for training data after combining.")
-                return
-
-            # Create sequences for test data
-            X_test, Y_test, test_indices = lstm_trainer.parallel_create_sequences(
-                data_processor.test_data, best_hyperparams['seq_length']
-            )
-            logger.info(f"Sequences created for test data. Test: {X_test.shape if X_test is not None else 'Empty'}")
-
-            if X_test is None:
-                logger.error("Unable to create valid sequences for test data.")
-                return
-
-            train_loader = lstm_trainer._create_dataloader(
-                X_train, Y_train, best_hyperparams['batch_size'], shuffle=True
-            )
-            val_loader = None  # No validation
-            test_loader = lstm_trainer._create_dataloader(
-                X_test, Y_test, best_hyperparams['batch_size'], shuffle=False
-            )
         else:
-            # Create sequences with the initial split
-            X_train, Y_train, _ = lstm_trainer.parallel_create_sequences(
-                data_processor.train_data, best_hyperparams['seq_length']
-            )
-            X_val, Y_val, _ = lstm_trainer.parallel_create_sequences(
-                data_processor.val_data, best_hyperparams['seq_length']
-            )
-            X_test, Y_test, test_indices = lstm_trainer.parallel_create_sequences(
-                data_processor.test_data, best_hyperparams['seq_length']
-            )
-
-            logger.info(f"Sequences created. Train: {X_train.shape if X_train is not None else 'Empty'}, "
-                        f"Val: {X_val.shape if X_val is not None else 'Empty'}, "
-                        f"Test: {X_test.shape if X_test is not None else 'Empty'}")
-
-            # Check if we have valid sequences before proceeding
-            if X_train is None or X_val is None or X_test is None:
-                logger.error("Unable to create valid sequences for all datasets even after adjusting sequence length.")
-                return
-
-            train_loader = lstm_trainer._create_dataloader(
-                X_train, Y_train, best_hyperparams['batch_size'], shuffle=True
-            )
-            val_loader = lstm_trainer._create_dataloader(
-                X_val, Y_val, best_hyperparams['batch_size'], shuffle=False
-            )
-            test_loader = lstm_trainer._create_dataloader(
-                X_test, Y_test, best_hyperparams['batch_size'], shuffle=False
-            )
+            logger.info("Using train data only for final training...")
 
         # Start final training
         logger.info(f"Starting final LSTM model training with hyperparameters: {best_hyperparams}")
-        model, _ = lstm_trainer.train_model(train_loader, val_loader, best_hyperparams.copy())
+        model, _ = lstm_trainer.train_model(data_processor.train_data, data_processor.val_data, data_processor.test_data, best_hyperparams.copy())
         logger.info("Final LSTM model training completed.")
 
         log_memory_usage()
         log_gpu_memory()
 
         # Evaluate on test set
+        test_loader = lstm_trainer._create_dataloader(
+            data_processor.test_data, 
+            best_hyperparams['seq_length'], 
+            best_hyperparams['batch_size']
+        )
         _, predictions, targets = lstm_trainer._evaluate(
             model, test_loader, nn.MSELoss(), return_predictions=True
         )
         logger.info(f"LSTM model evaluation completed. Number of predictions: {len(predictions)}")
 
         # Prepare DataFrame with Predictions
-        test_data = data_processor.test_data.iloc[test_indices]
+        test_data = data_processor.test_data
         predictions_df = pd.DataFrame({
             'permno': test_data['permno'].values,
             'date': test_data['date'].values,

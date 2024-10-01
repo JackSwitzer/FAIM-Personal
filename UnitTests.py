@@ -91,14 +91,44 @@ class TestLSTMTrainer(unittest.TestCase):
     def test_create_sequences(self):
         try:
             seq_length = 5
-            X, Y, indices = self.trainer.create_sequences(self.df, seq_length)
-            self.assertEqual(len(X), len(Y))
-            self.assertEqual(len(X), len(self.df) - seq_length + 1)
+            trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
+            X, Y, indices = trainer.create_sequences(self.df, seq_length)
+            
+            self.assertIsNotNone(X)
+            self.assertIsNotNone(Y)
+            self.assertIsNotNone(indices)
+            
+            expected_sequences = len(self.df) - seq_length + 1
+            self.assertEqual(len(X), expected_sequences, 
+                             f"Expected {expected_sequences} sequences, but got {len(X)}")
+            self.assertEqual(len(Y), expected_sequences)
+            self.assertEqual(len(indices), expected_sequences)
+            
             self.assertEqual(X.shape[1], seq_length)
+            self.assertEqual(X.shape[2], len(self.feature_cols))
+            
+            # Check if the sequences are correct
+            for i in range(len(X)):
+                np.testing.assert_array_equal(X[i], self.df[self.feature_cols].iloc[i:i+seq_length].values)
+                self.assertEqual(Y[i], self.df[self.target_col].iloc[i+seq_length-1])
+                self.assertEqual(indices[i], self.df.index[i+seq_length-1])
         except Exception as e:
             print(f"Error in test_create_sequences: {str(e)}")
             print(traceback.format_exc())
             raise
+
+    def test_create_sequences_empty(self):
+        seq_length = 100  # Larger than the group size
+        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
+        X, Y, indices = trainer.create_sequences(self.df, seq_length)
+        
+        self.assertIsNotNone(X)
+        self.assertIsNotNone(Y)
+        self.assertIsNotNone(indices)
+        
+        self.assertEqual(len(X), 0)
+        self.assertEqual(len(Y), 0)
+        self.assertEqual(len(indices), 0)
 
 class TestLSTMModel(unittest.TestCase):
     def test_forward_pass(self):
@@ -208,6 +238,59 @@ class TestDynamicDateSplitting(unittest.TestCase):
     def tearDown(self):
         if os.path.exists(self.data_in_path):
             os.remove(self.data_in_path)
+
+class TestSequenceCreation(unittest.TestCase):
+    def setUp(self):
+        # Create a sample dataset
+        dates = pd.date_range(start='2021-01-01', periods=100)
+        permnos = [10001, 10002, 10003]
+        data = []
+        for permno in permnos:
+            for date in dates:
+                data.append({
+                    'permno': permno,
+                    'date': date,
+                    'feature1': np.random.randn(),
+                    'feature2': np.random.randn(),
+                    'stock_exret': np.random.randn()
+                })
+        self.df = pd.DataFrame(data)
+        self.feature_cols = ['feature1', 'feature2']
+        self.target_col = 'stock_exret'
+
+    def test_create_sequences_valid(self):
+        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
+        seq_length = 10
+        X, Y, _ = trainer.create_sequences(self.df, seq_length)
+        self.assertIsNotNone(X)
+        self.assertIsNotNone(Y)
+        self.assertEqual(X.shape[1], seq_length)
+        self.assertEqual(X.shape[0], Y.shape[0])
+
+    def test_create_sequences_short_data(self):
+        short_df = self.df[self.df['permno'] == 10001].iloc[:5]  # Only 5 data points
+        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
+        seq_length = 10
+        X, Y, _ = trainer.create_sequences(short_df, seq_length)
+        self.assertIsNone(X)
+        self.assertIsNone(Y)
+
+    def test_create_sequences_varying_lengths(self):
+        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
+        for seq_length in [2, 5, 20, 50]:
+            X, Y, _ = trainer.create_sequences(self.df, seq_length)
+            self.assertIsNotNone(X)
+            self.assertIsNotNone(Y)
+            self.assertLessEqual(X.shape[1], seq_length)
+
+    def test_parallel_create_sequences(self):
+        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
+        seq_length = 10
+        X, Y, _ = trainer.parallel_create_sequences(self.df, seq_length)
+        self.assertIsNotNone(X)
+        self.assertIsNotNone(Y)
+        self.assertEqual(X.shape[1], seq_length)
+        self.assertEqual(X.shape[0], Y.shape[0])
 
 if __name__ == '__main__':
     unittest.main()
