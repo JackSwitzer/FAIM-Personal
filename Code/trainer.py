@@ -4,16 +4,14 @@ import shutil
 import json
 import numpy as np
 import multiprocessing
-from functools import partial
 import time
 import traceback
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, IterableDataset, Dataset
-from torch.amp import GradScaler, autocast
-
+from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast  # Corrected import
 import pandas as pd
 import optuna
 from tqdm import tqdm
@@ -27,7 +25,7 @@ class LSTMTrainer:
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
     def __init__(self, feature_cols, target_col, device=Config.DEVICE, config=Config):
-        self.logger = get_logger()
+        self.logger = logging.getLogger(__name__)  # Use module-level logger
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.logger.info(f"Target column set to: {self.target_col}")
@@ -39,17 +37,15 @@ class LSTMTrainer:
         os.makedirs(self.out_dir, exist_ok=True)  # Ensure output directory exists
         os.makedirs(self.model_weights_dir, exist_ok=True)  # Ensure model weights directory exists
 
-
     def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
         """
         Create a DataLoader for the given data.
         """
         dataset = SequenceDataset(
             data, 
-            self.feature_cols, 
-            self.target_col, 
             seq_length,
-            logger=self.logger  # Pass the logger to SequenceDataset if needed
+            self.feature_cols, 
+            self.target_col
         )
         dataloader = DataLoader(
             dataset, 
@@ -85,7 +81,7 @@ class LSTMTrainer:
         num_epochs = hyperparams.get('num_epochs', Config.NUM_EPOCHS)
         accumulation_steps = hyperparams.get('accumulation_steps', Config.ACCUMULATION_STEPS)
         clip_grad_norm = hyperparams.get('clip_grad_norm', Config.CLIP_GRAD_NORM)
-        
+
         # Get LSTM params, update with any provided in hyperparams
         lstm_params = Config.get_lstm_params()
         lstm_params.update({k: v for k, v in hyperparams.items() if k in lstm_params})
@@ -129,7 +125,7 @@ class LSTMTrainer:
             model, optimizer, scheduler, start_epoch, best_val_loss, loaded_hyperparams = self.load_checkpoint(
                 model, optimizer, scheduler
             )
-            
+
             # Check if loaded hyperparameters match current hyperparameters
             if loaded_hyperparams and loaded_hyperparams != hyperparams:
                 self.logger.warning("Loaded hyperparameters do not match current hyperparameters. "
@@ -142,17 +138,17 @@ class LSTMTrainer:
         # Gradient accumulation setup
         if accumulation_steps < 1:
             accumulation_steps = 1
-        self.logger.info(f"Using gradient accumulation with {accumulation_steps} steps")
-        
+        self.logger.debug(f"Using gradient accumulation with {accumulation_steps} steps")
+
         # Adjust number of workers to a reasonable number
         num_workers = hyperparams.get('num_workers', Config.NUM_WORKERS)
-        num_workers = min(num_workers, 4)  
+        num_workers = min(num_workers, 4)
 
         # Create data loaders outside the training loop
         train_loader = self._create_dataloader(train_data, seq_length, batch_size, num_workers=num_workers)
         val_loader = self._create_dataloader(val_data, seq_length, batch_size, num_workers=num_workers) if val_data is not None else None
         test_loader = self._create_dataloader(test_data, seq_length, batch_size, num_workers=num_workers) if test_data is not None else None
-        
+
         last_log_time = time.time()
         total_train_time = 0
 
@@ -173,12 +169,12 @@ class LSTMTrainer:
                 if epoch % Config.LOG_INTERVAL == 0 or epoch == num_epochs:
                     current_time = time.time()
                     time_since_last_log = current_time - last_log_time
-                    
+
                     self.logger.info(f"Epoch {epoch}/{num_epochs} completed")
                     self.logger.info(f"Time since last log: {time_since_last_log:.2f} seconds")
                     self.logger.info(f"Average time per epoch: {total_train_time / (epoch - start_epoch + 1):.2f} seconds")
                     self.logger.info(f"Train Loss: {train_loss:.4f}")
-                    
+
                     # Log GPU and memory usage
                     log_memory_usage()
                     log_gpu_memory_usage()
@@ -189,7 +185,7 @@ class LSTMTrainer:
                 if val_loader is not None:
                     val_loss = self._evaluate(model, val_loader, criterion)
                     val_losses.append(val_loss)
-                    
+
                     # Log validation loss at specified intervals or on the last epoch
                     if epoch % Config.LOG_INTERVAL == 0 or epoch == num_epochs:
                         self.logger.info(f"Validation Loss: {val_loss:.4f}")
@@ -472,9 +468,7 @@ class LSTMTrainer:
 
         for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
             batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
-            
-            # Optionally disable autocast for testing
-            # with torch.no_grad():
+
             with autocast(device_type=self.device.type, dtype=torch.float16):
                 outputs = model(batch_X).squeeze(-1)
                 loss = criterion(outputs, batch_Y) / accumulation_steps
@@ -485,7 +479,7 @@ class LSTMTrainer:
                 if clip_grad_norm:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-                
+
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)  # Reset gradients after optimizer step

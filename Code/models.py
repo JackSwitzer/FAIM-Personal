@@ -13,6 +13,9 @@ from utils import get_logger
 from config import Config
 
 class SequenceDataset(Dataset):
+    """
+    Custom Dataset for sequence data used in LSTM models.
+    """
     def __init__(self, data, seq_length, feature_cols, target_col):
         self.seq_length = seq_length
         self.feature_cols = feature_cols

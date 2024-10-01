@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler
 from multiprocessing import Pool
 from itertools import chain
+import logging
 
 from utils import get_logger
 from config import Config
@@ -12,7 +13,7 @@ class DataProcessor:
     A class to handle data loading, preprocessing, transformation, and splitting.
     """
     def __init__(self, data_in_path, ret_var='stock_exret', standardize=True):
-        self.logger = get_logger()
+        self.logger = logging.getLogger(__name__)  # Use module-level logger
         self.ret_var = ret_var
         self.data_in_path = data_in_path
         self.standardize = standardize
@@ -106,24 +107,15 @@ class DataProcessor:
             self.stock_data = self.stock_data.dropna(subset=[self.ret_var])
         self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
 
-        self.logger.info(f"Target column '{self.ret_var}' present in data: {self.ret_var in self.stock_data.columns}")
-        self.logger.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
+        self.logger.debug(f"Target column '{self.ret_var}' present in data: {self.ret_var in self.stock_data.columns}")
+        self.logger.debug(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
         if self.ret_var not in self.stock_data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
         
-        self.logger.info(f"Updated feature columns: {self.feature_cols}")
+        self.logger.debug(f"Updated feature columns: {self.feature_cols}")
 
-        # # Filter out stocks with insufficient data points
-        # min_seq_length = Config.MIN_SEQUENCE_LENGTH  # Define this parameter in your config
-        # stock_counts = self.stock_data.groupby('permno').size()
-        # valid_permnos = stock_counts[stock_counts >= min_seq_length].index
-        # self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)]
-        
-        # self.logger.info(f"Filtered stocks with at least {min_seq_length} data points.")
-        # self.logger.info(f"Remaining stocks: {self.stock_data['permno'].nunique()}")
-
-        # # After preprocessing, filter the stocks
-        self.filter_stocks_by_min_length() # moved to a function
+        # Filter out stocks with insufficient data points
+        self.filter_stocks_by_min_length()
 
     def split_data(self):
         """
@@ -171,8 +163,8 @@ class DataProcessor:
         if train_years + val_years + test_years < total_years:
             test_years += total_years - (train_years + val_years + test_years)
 
-        self.logger.info(f"Total years: {total_years}")
-        self.logger.info(f"Train years: {train_years}, Validation years: {val_years}, Test years: {test_years}")
+        self.logger.debug(f"Total years: {total_years}")
+        self.logger.debug(f"Train years: {train_years}, Validation years: {val_years}, Test years: {test_years}")
 
         # Calculate split dates
         train_end_date = min_date + pd.DateOffset(years=train_years)
@@ -201,8 +193,8 @@ class DataProcessor:
         actual_val_years = (val_end_date - train_end_date).days / 365.25
         actual_test_years = (max_date - val_end_date).days / 365.25
 
-        self.logger.info(f"Actual split (in years): Train: {actual_train_years:.2f}, "
-                         f"Validation: {actual_val_years:.2f}, Test: {actual_test_years:.2f}")
+        self.logger.debug(f"Actual split (in years): Train: {actual_train_years:.2f}, "
+                          f"Validation: {actual_val_years:.2f}, Test: {actual_test_years:.2f}")
 
         return train_data, val_data, test_data
 
@@ -223,7 +215,7 @@ class DataProcessor:
         """
         Create sequences of data for LSTM input using a generator.
         """
-        self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
+        self.logger.debug(f"Columns used for sequence creation: {data.columns.tolist()}")
         if self.ret_var not in data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data for sequence creation.")
             return
@@ -259,7 +251,7 @@ class DataProcessor:
                 results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
             return chain.from_iterable(results)
         except KeyboardInterrupt:
-            self.logger.info("KeyboardInterrupt received. Terminating workers.")
+            self.logger.warning("KeyboardInterrupt received. Terminating workers.")
             pool.terminate()
             pool.join()
         finally:

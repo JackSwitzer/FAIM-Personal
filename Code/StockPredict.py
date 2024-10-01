@@ -12,7 +12,7 @@ from models import RegressionModels
 def main_Regression():
     out_dir = Config.OUT_DIR
     setup_logging(out_dir)
-    logger = get_logger()
+    logger = logging.getLogger(__name__)  # Use module-level logger
 
     set_seed()
     try:
@@ -88,7 +88,7 @@ def main_Regression():
 def main():
     try:
         setup_logging(Config.OUT_DIR)
-        logger = get_logger()
+        logger = logging.getLogger(__name__)  # Use module-level logger
         os.makedirs(Config.MODEL_WEIGHTS_DIR, exist_ok=True)
         set_seed(Config.SEED)
         clear_gpu_memory()
@@ -110,9 +110,9 @@ def main():
 
         # Initialize LSTMTrainer
         lstm_trainer = LSTMTrainer(
-         feature_cols=data_processor.feature_cols,
-         target_col=target_variable,
-         device=device 
+            feature_cols=data_processor.feature_cols,
+            target_col=target_variable,
+            device=device
         )
 
         # Determine minimum group length
@@ -175,7 +175,7 @@ def main():
         yreal = test_data[target_variable]
         ypred = test_data['lstm_prediction']
         r2_lstm = calculate_oos_r2(yreal.values, ypred)
-        logger.info(f'{target_variable} LSTM OOS R2: {r2_lstm:.4f}')
+        logger.info(f"{target_variable} LSTM OOS R2: {r2_lstm:.4f}")
 
         # Save LSTM predictions
         output_filename = 'lstm_predictions.csv'
