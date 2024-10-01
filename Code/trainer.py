@@ -6,6 +6,7 @@ import numpy as np
 import multiprocessing
 from functools import partial
 import time
+import traceback
 
 import torch
 import torch.nn as nn
@@ -86,7 +87,7 @@ class LSTMTrainer:
 
         Returns:
             model (nn.Module): Trained model.
-            best_val_loss (float): Best validation loss achieved.
+            training_history (dict): Dictionary containing training history.
         """
         self.logger.info(f"Starting training with hyperparameters: {hyperparams}")
         self.logger.info(f"Training on device: {self.device}")
@@ -254,23 +255,73 @@ class LSTMTrainer:
                 model.load_state_dict(best_model_state)
                 self.logger.info("Loaded best model state.")
 
-            return model, best_val_loss if val_data is not None else None
+            training_history = {
+                'train_losses': train_losses,
+                'val_losses': val_losses,
+                'test_losses': test_losses
+            }
+            return model, training_history
+
         except KeyboardInterrupt:
-            self.logger.info("Training interrupted by user. Saving current model state...")
-            # Save checkpoint only if not in hyperparameter optimization
+            self.logger.warning("Training interrupted by user.")
+            self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+            raise
+
+        except Exception as e:
+            self.logger.error(f"An error occurred during training: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+            raise
+
+        finally:
+            # Cleanup
+            self.logger.info("Training run completed or interrupted.")
             if trial is None:
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                    'best_val_loss': best_val_loss,
-                    'hyperparams': hyperparams
-                }
-                checkpoint_path = os.path.join(self.model_weights_dir, 'interrupted_checkpoint.pth')
-                torch.save(checkpoint, checkpoint_path)
-                self.logger.info(f"Checkpoint saved at epoch {epoch}. Training can be resumed later.")
-            raise  # Re-raise the exception to exit
+                self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+
+    def _save_interrupted_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
+        """Save the current state when training is interrupted."""
+        try:
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'best_val_loss': best_val_loss,
+                'hyperparams': hyperparams
+            }
+            checkpoint_path = os.path.join(self.model_weights_dir, 'interrupted_checkpoint.pth')
+            torch.save(checkpoint, checkpoint_path)
+            self.logger.info(f"Interrupted state saved at epoch {epoch}. Training can be resumed later.")
+        except Exception as e:
+            self.logger.error(f"Failed to save interrupted state: {str(e)}")
+
+    def _save_final_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
+        """Save the final state of training."""
+        try:
+            # Save the final model state
+            final_model_path = os.path.join(self.model_weights_dir, 'final_model.pth')
+            torch.save(model.state_dict(), final_model_path)
+            self.logger.info(f"Final model state saved to {final_model_path}")
+
+            # Save the final checkpoint
+            final_checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'best_val_loss': best_val_loss,
+                'hyperparams': hyperparams
+            }
+            final_checkpoint_path = os.path.join(self.model_weights_dir, 'final_checkpoint.pth')
+            torch.save(final_checkpoint, final_checkpoint_path)
+            self.logger.info(f"Final checkpoint saved to {final_checkpoint_path}")
+
+            # Save the hyperparameters
+            self.save_hyperparams(hyperparams, is_best=False)
+            self.logger.info("Final hyperparameters saved.")
+        except Exception as e:
+            self.logger.error(f"Failed to save final state: {str(e)}")
 
     def optimize_hyperparameters(self, train_data, val_data, test_data, n_trials=Config.N_TRIALS):
         """
@@ -335,17 +386,29 @@ class LSTMTrainer:
         return self.best_hyperparams, best_val_loss
 
     def load_hyperparams(self, is_best=True):
-        """Load hyperparameters from a JSON file."""
-        filename = "best_hyperparams.json" if is_best else "current_hyperparams.json"
-        file_path = os.path.join(self.out_dir, filename)
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
+        # Adjust method to load hyperparameters for the single target variable
+        filename = "best_hyperparams.json" if is_best else "hyperparams.json"
+        filepath = os.path.join(self.out_dir, filename)
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
                 hyperparams = json.load(f)
-            self.logger.info(f"Loaded hyperparameters from: {file_path}")
             return hyperparams
         else:
-            self.logger.info(f"No hyperparameter file found at: {file_path}")
+            self.logger.info(f"No hyperparameter file found at: {filepath}")
             return None
+
+    def save_hyperparams(self, hyperparams, is_best=False):
+        # Adjust method to save hyperparameters for the single target variable
+        filename = "best_hyperparams.json" if is_best else "hyperparams.json"
+        filepath = os.path.join(self.out_dir, filename)
+        with open(filepath, 'w') as f:
+            json.dump(hyperparams, f)
+
+    def save_model(self, model, is_best=False):
+        # Adjust method to save model weights for stock_exret
+        filename = "best_model.pt" if is_best else "model.pt"
+        filepath = os.path.join(self.model_weights_dir, filename)
+        torch.save(model.state_dict(), filepath)
 
     def save_checkpoint(self, state, is_best=False, filename='checkpoint.pth.tar'):
         """
@@ -453,11 +516,3 @@ class LSTMTrainer:
             return avg_loss, predictions, targets
         else:
             return avg_loss
-
-    def save_hyperparams(self, hyperparams, is_best=False):
-        """Save hyperparameters to a JSON file."""
-        filename = "best_hyperparams.json" if is_best else "current_hyperparams.json"
-        file_path = os.path.join(self.out_dir, filename)
-        with open(file_path, 'w') as f:
-            json.dump(hyperparams, f, indent=2)
-        self.logger.info(f"Hyperparameters saved to: {file_path}")

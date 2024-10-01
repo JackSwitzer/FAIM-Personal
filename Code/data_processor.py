@@ -52,16 +52,22 @@ class DataProcessor:
 
     def preprocess_data(self):
         """Preprocess the data: handle missing values, select features, and standardize if needed."""
+        # Work on a copy of the data to avoid modifying the original
+        self.stock_data = self.stock_data.copy()
+
         # Extract temporal features for seasonality
         self.stock_data['month'] = self.stock_data['date'].dt.month
         self.stock_data['day_of_week'] = self.stock_data['date'].dt.dayofweek
         self.stock_data['quarter'] = self.stock_data['date'].dt.quarter
 
-        # Encode cyclical features
-        self.stock_data['month_sin'] = np.sin(2 * np.pi * self.stock_data['month']/12)
-        self.stock_data['month_cos'] = np.cos(2 * np.pi * self.stock_data['month']/12)
-        self.stock_data['day_of_week_sin'] = np.sin(2 * np.pi * self.stock_data['day_of_week']/7)
-        self.stock_data['day_of_week_cos'] = np.cos(2 * np.pi * self.stock_data['day_of_week']/7)
+        # Create new cyclical features in bulk
+        cyclical_features = pd.DataFrame({
+            'month_sin': np.sin(2 * np.pi * self.stock_data['month'] / 12),
+            'month_cos': np.cos(2 * np.pi * self.stock_data['month'] / 12),
+            'day_of_week_sin': np.sin(2 * np.pi * self.stock_data['day_of_week'] / 7),
+            'day_of_week_cos': np.cos(2 * np.pi * self.stock_data['day_of_week'] / 7),
+        })
+        self.stock_data = pd.concat([self.stock_data, cyclical_features], axis=1)
 
         # Exclude non-feature columns
         non_feature_cols = ["year", "month", "day_of_week", "quarter", "date", "permno", self.ret_var]
@@ -70,27 +76,37 @@ class DataProcessor:
         numeric_cols = self.stock_data.select_dtypes(include=['number']).columns.tolist()
         self.feature_cols = [col for col in numeric_cols if col not in non_feature_cols]
 
-        # Include the new cyclical features
-        self.feature_cols.extend(['month_sin', 'month_cos', 'day_of_week_sin', 'day_of_week_cos'])
+        # Include the new cyclical features without duplicates
+        additional_cols = ['month_sin', 'month_cos', 'day_of_week_sin', 'day_of_week_cos']
+        self.feature_cols.extend([col for col in additional_cols if col not in self.feature_cols])
+
+        # Ensure feature_cols has unique columns
+        self.feature_cols = list(set(self.feature_cols))
+
+        # Check for missing feature columns in self.stock_data
+        missing_cols = [col for col in self.feature_cols if col not in self.stock_data.columns]
+        if missing_cols:
+            self.logger.error(f"The following feature columns are missing from the data: {missing_cols}")
 
         # Handle missing values
-        self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].fillna(0).astype('float32')
+        self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].fillna(0)
 
         # Standardization
         if self.standardize:
             self.scaler = StandardScaler()
             self.stock_data[self.feature_cols] = self.scaler.fit_transform(self.stock_data[self.feature_cols])
             self.logger.info("Data standardized.")
-            # Cast to float32
-            self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
+
+        # Cast to float32
+        self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].astype('float32')
         
-        # Check for missing values in the target variable
+        # Handle missing values in the target variable
         if self.stock_data[self.ret_var].isnull().any():
             self.logger.warning(f"Missing values found in target variable '{self.ret_var}'. Filling with 0.")
-            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].fillna(0).astype('float32')
-        else:
-            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
+            self.stock_data[self.ret_var] = self.stock_data[self.ret_var].fillna(0)
+        self.stock_data[self.ret_var] = self.stock_data[self.ret_var].astype('float32')
 
+        self.logger.info(f"Target column '{self.ret_var}' present in data: {self.ret_var in self.stock_data.columns}")
         self.logger.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
         if self.ret_var not in self.stock_data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
@@ -225,9 +241,16 @@ class DataProcessor:
                 yield seq, target, target_index
 
     def parallel_create_sequences(self, data, seq_length, num_processes=None):
-        with Pool(num_processes) as pool:
-            chunks = np.array_split(data, num_processes)
-            results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
-        
-        # Chain the generators from all processes
-        return chain.from_iterable(results)
+        try:
+            with Pool(num_processes) as pool:
+                chunks = np.array_split(data, num_processes)
+                results = pool.starmap(self.create_sequences, [(chunk, seq_length) for chunk in chunks])
+            return chain.from_iterable(results)
+        except KeyboardInterrupt:
+            self.logger.info("KeyboardInterrupt received. Terminating workers.")
+            pool.terminate()
+            pool.join()
+        finally:
+            if 'pool' in locals():
+                pool.close()
+                pool.join()
