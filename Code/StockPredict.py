@@ -110,8 +110,9 @@ def main():
 
         # Initialize LSTMTrainer
         lstm_trainer = LSTMTrainer(
-            feature_cols=data_processor.feature_cols,
-            target_col=target_variable
+         feature_cols=data_processor.feature_cols,
+         target_col=target_variable,
+         device=device 
         )
 
         # Determine minimum group length
@@ -138,7 +139,7 @@ def main():
 
         # Adjust sequence length if necessary
         if best_hyperparams['seq_length'] > min_group_length:
-            best_hyperparams['seq_length'] = min_group_length
+            best_hyperparams['seq_length'] = max(min_group_length, Config.MIN_SEQUENCE_LENGTH)
             logger.info(
                 f"Adjusted sequence length to: {best_hyperparams['seq_length']} "
                 f"due to minimum group length."

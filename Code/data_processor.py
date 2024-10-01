@@ -113,14 +113,17 @@ class DataProcessor:
         
         self.logger.info(f"Updated feature columns: {self.feature_cols}")
 
-        # Filter out stocks with insufficient data points
-        min_seq_length = Config.MIN_SEQUENCE_LENGTH  # Define this parameter in your config
-        stock_counts = self.stock_data.groupby('permno').size()
-        valid_permnos = stock_counts[stock_counts >= min_seq_length].index
-        self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)]
+        # # Filter out stocks with insufficient data points
+        # min_seq_length = Config.MIN_SEQUENCE_LENGTH  # Define this parameter in your config
+        # stock_counts = self.stock_data.groupby('permno').size()
+        # valid_permnos = stock_counts[stock_counts >= min_seq_length].index
+        # self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)]
         
-        self.logger.info(f"Filtered stocks with at least {min_seq_length} data points.")
-        self.logger.info(f"Remaining stocks: {self.stock_data['permno'].nunique()}")
+        # self.logger.info(f"Filtered stocks with at least {min_seq_length} data points.")
+        # self.logger.info(f"Remaining stocks: {self.stock_data['permno'].nunique()}")
+
+        # # After preprocessing, filter the stocks
+        self.filter_stocks_by_min_length() # moved to a function
 
     def split_data(self):
         """
@@ -263,3 +266,37 @@ class DataProcessor:
             if 'pool' in locals():
                 pool.close()
                 pool.join()
+
+    def get_min_group_length(self):
+        """
+        Calculate the minimum sequence length (number of data points) across all groups (stocks)
+        in the training, validation, and test datasets.
+        """
+        # Calculate minimum group length in training data
+        train_group_lengths = self.train_data.groupby('permno').size()
+        min_train_length = train_group_lengths.min() if not train_group_lengths.empty else float('inf')
+
+        # Calculate minimum group length in validation data
+        val_group_lengths = self.val_data.groupby('permno').size()
+        min_val_length = val_group_lengths.min() if not val_group_lengths.empty else float('inf')
+
+        # Calculate minimum group length in test data
+        test_group_lengths = self.test_data.groupby('permno').size()
+        min_test_length = test_group_lengths.min() if not test_group_lengths.empty else float('inf')
+
+        # Find the overall minimum
+        min_group_length = min(min_train_length, min_val_length, min_test_length)
+
+        self.logger.info(f"Minimum group lengths - Train: {min_train_length}, Validation: {min_val_length}, Test: {min_test_length}")
+        return min_group_length
+
+    def filter_stocks_by_min_length(self):
+        """
+        Filter out stocks that have fewer data points than MIN_SEQUENCE_LENGTH.
+        """
+        min_len = Config.MIN_SEQUENCE_LENGTH
+        group_lengths = self.stock_data.groupby('permno').size()
+        valid_permnos = group_lengths[group_lengths >= min_len].index
+        self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)].copy()
+        self.logger.info(f"Filtered stocks with at least {min_len} data points.")
+        self.logger.info(f"Remaining stocks: {len(valid_permnos)}")

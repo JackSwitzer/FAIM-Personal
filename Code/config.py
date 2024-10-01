@@ -46,6 +46,7 @@ class Config:
 
     # Hyperparameter optimization settings
     N_TRIALS = 25
+    HYPEROPT_EPOCHS = 10  # Number of epochs during hyperparameter tuning
 
     # Logging settings
     LOG_INTERVAL = 5  # Log every 5 epochs

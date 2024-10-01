@@ -14,45 +14,26 @@ from config import Config
 
 class SequenceDataset(Dataset):
     def __init__(self, data, seq_length, feature_cols, target_col):
-        self.logger = get_logger()
         self.seq_length = seq_length
         self.feature_cols = feature_cols
         self.target_col = target_col
 
-        # Sort data and reset index
-        data = data.sort_values(['permno', 'date']).reset_index(drop=True)
+        # Store only indices instead of actual data
+        self.data = data.sort_values(['permno', 'date']).reset_index(drop=True)
+        self.permno_array = self.data['permno'].values
 
-        # Store features and target as NumPy arrays for efficient access
-        self.data_features = data[self.feature_cols].values.astype(np.float32)
-        self.data_target = data[self.target_col].values.astype(np.float32)
-        self.permno_array = data['permno'].values
-
-        # Initialize self.indices
+        # Precompute group indices to avoid recalculating
         self.indices = self._create_indices()
-        self.logger.info(f"Number of sequences: {len(self.indices):,}")
 
     def _create_indices(self):
         indices = []
-        permno = self.permno_array
-        seq_length = self.seq_length
-        total_length = len(permno)
+        permno_groups = self.data.groupby('permno')
 
-        start_idx = 0
-        while start_idx < total_length - seq_length + 1:
-            current_permno = permno[start_idx]
-            end_idx = start_idx
-
-            # Find the subsequence where permno remains the same
-            while end_idx < total_length and permno[end_idx] == current_permno:
-                end_idx += 1
-
-            group_length = end_idx - start_idx
-
-            if group_length >= seq_length:
-                for i in range(start_idx, end_idx - seq_length + 1):
-                    indices.append((i, i + seq_length - 1))
-
-            start_idx = end_idx
+        for _, group in permno_groups:
+            group_length = len(group)
+            if group_length >= self.seq_length:
+                for i in range(group_length - self.seq_length + 1):
+                    indices.append((group.index[i], group.index[i + self.seq_length - 1]))
 
         return indices
 
@@ -61,9 +42,10 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         start_idx, end_idx = self.indices[idx]
-        seq = self.data_features[start_idx:end_idx + 1]
-        target = self.data_target[end_idx]
-        return torch.from_numpy(seq), torch.tensor(target, dtype=torch.float32)
+        seq_data = self.data.loc[start_idx:end_idx]
+        seq = seq_data[self.feature_cols].values.astype(np.float32)
+        target = seq_data[self.target_col].values[-1].astype(np.float32)
+        return torch.from_numpy(seq), torch.tensor(target)
 
 class RegressionModels:
     """

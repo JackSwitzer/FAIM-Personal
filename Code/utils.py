@@ -7,49 +7,47 @@ import gc
 import sys
 import importlib
 import pynvml
+from torch.distributed import ReduceOp
 from packaging import version
 from datetime import datetime
 from config import Config
+from logging.handlers import RotatingFileHandler
 
 # Create a global logger
 logger = logging.getLogger('stock_predictor')
 logger.setLevel(logging.INFO)
 
-def setup_logging(out_dir, level=logging.INFO):
+def setup_logging(log_dir, log_filename=None):
     """Set up logging configuration with a unique log file name."""
-    global logger
+    if log_filename is None:
+        log_filename = f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_path = os.path.join(log_dir, 'logs')
+    os.makedirs(log_path, exist_ok=True)
+    log_file = os.path.join(log_path, log_filename)
+    
+    # Get the root logger
+    logger = logging.getLogger()
+    
+    # Check if handlers are already set up to avoid duplicate logs
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
+        
+        # Console handler
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
 
-    # Remove all handlers associated with the logger object
-    if logger.hasHandlers():
-        logger.handlers.clear()
-
-    # Create log directory
-    log_dir = os.path.join(out_dir, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Use system time at the start of the run
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = os.path.join(log_dir, f"training_{timestamp}.log")
-
-    # File handler
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(level)
-    fh.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
-
-    # Stream handler
-    ch = logging.StreamHandler()
-    ch.setLevel(level)
-    ch.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
-
-    # Add handlers to logger
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-
+        # File handler with rotation
+        fh = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+        
     logger.info(f"Logging initialized. Log file: {log_file}")
 
-def get_logger():
+def get_logger(name=None):
     """Retrieve the global logger instance."""
-    return logger
+    return logging.getLogger(name)
 
 def save_csv(df, output_dir, filename):
     """Save the DataFrame to a CSV file."""
@@ -72,7 +70,7 @@ def clear_gpu_memory():
     """Clear GPU memory by deleting unnecessary variables and emptying the cache."""
     for obj in gc.get_objects():
         try:
-            if torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data)):
+            if isinstance(obj, torch.Tensor) or (hasattr(obj, 'data') and isinstance(obj.data, torch.Tensor)):
                 del obj
         except:
             pass
@@ -116,9 +114,9 @@ def log_gpu_memory_usage():
 def check_torch_version():
     required_version = "1.7.0"  # Adjust this to the minimum required version
     current_version = torch.__version__
+    logger.info(f"Using PyTorch version: {current_version}")
     if version.parse(current_version) < version.parse(required_version):
         logger.warning(f"PyTorch version {current_version} is older than the recommended version {required_version}. Some features may not work as expected.")
-    logger.info(f"Using PyTorch version: {current_version}")
 
 def log_memory_usage():
     import psutil

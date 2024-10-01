@@ -26,53 +26,39 @@ class LSTMTrainer:
     """
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
-    def __init__(self, feature_cols, target_col, device, out_dir=Config.OUT_DIR, model_weights_dir=Config.MODEL_WEIGHTS_DIR):
+    def __init__(self, feature_cols, target_col, device=Config.DEVICE, config=Config):
         self.logger = get_logger()
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.logger.info(f"Target column set to: {self.target_col}")
         self.device = device
-        self.out_dir = out_dir
-        self.model_weights_dir = model_weights_dir if model_weights_dir else os.path.join(out_dir, "model_weights")
+        self.config = config
+        self.out_dir = config.OUT_DIR
+        self.model_weights_dir = config.MODEL_WEIGHTS_DIR or os.path.join(self.out_dir, "model_weights")
         self.best_hyperparams = None  # To store the best hyperparameters
         os.makedirs(self.out_dir, exist_ok=True)  # Ensure output directory exists
         os.makedirs(self.model_weights_dir, exist_ok=True)  # Ensure model weights directory exists
 
-    def create_sequences(self, data, seq_length):
-        """
-        Create sequences of data for LSTM input using a generator.
-        """
-        self.logger.info(f"Columns used for sequence creation: {data.columns.tolist()}")
-        if self.target_col not in data.columns:
-            self.logger.error(f"Target column '{self.target_col}' not found in the data for sequence creation.")
-            return
-        
-        data = data.sort_values(['permno', 'date'])
-        grouped = data.groupby('permno')
 
-        for permno, group in grouped:
-            group_length = len(group)
-            if group_length < seq_length:
-                self.logger.debug(f"Skipping 'permno' {permno} due to insufficient data. Group size: {group_length}")
-                continue
-            group_X = group[self.feature_cols].values
-            group_Y = group[self.target_col].values
-            group_indices = group.index.values
-            for i in range(group_length - seq_length + 1):
-                seq = group_X[i:i+seq_length]
-                target = group_Y[i+seq_length-1]
-                target_index = group_indices[i+seq_length-1]
-                yield seq, target, target_index
-
-    def _create_dataloader(self, data, seq_length, batch_size, num_workers=0):
-        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=False,
+    def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
+        """
+        Create a DataLoader for the given data.
+        """
+        dataset = SequenceDataset(
+            data, 
+            self.feature_cols, 
+            self.target_col, 
+            seq_length,
+            logger=self.logger  # Pass the logger to SequenceDataset if needed
+        )
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=batch_size, 
+            shuffle=True, 
             num_workers=num_workers,
             pin_memory=True
         )
+        return dataloader
 
     def train_model(self, train_data, val_data, test_data, hyperparams, trial=None):
         """
@@ -357,7 +343,7 @@ class LSTMTrainer:
                 'seq_length': trial.suggest_int('seq_length', 2, 12),  # Experiment with shorter sequence lengths
                 'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),  # Increased batch sizes
                 'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
-                'num_epochs': 20,
+                'num_epochs': Config.HYPEROPT_EPOCHS,
                 'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256]),
                 'num_layers': trial.suggest_int('num_layers', 1, 4),
                 'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.3),
@@ -381,6 +367,7 @@ class LSTMTrainer:
 
         # Store and return best hyperparameters
         self.best_hyperparams = study.best_params
+        self.best_hyperparams['num_epochs'] = Config.HYPEROPT_EPOCHS
         best_val_loss = study.best_value
 
         # Train and save the best model
