@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast  # Corrected import
+from torch.amp import GradScaler, autocast
 import pandas as pd
 import optuna
 from tqdm import tqdm
