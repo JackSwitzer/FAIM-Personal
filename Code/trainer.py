@@ -104,7 +104,7 @@ class LSTMTrainer:
         lstm_params.update({k: v for k, v in hyperparams.items() if k in lstm_params})
 
         # Initialize model
-        input_size = len(self.feature_cols)
+        input_size = len(self.feature_cols)  # Updated feature dimension
         model = LSTMModel(input_size=input_size, **lstm_params).to(self.device)
 
         # Set up optimizer
@@ -288,7 +288,7 @@ class LSTMTrainer:
         """
         def objective(trial):
             hyperparams = {
-                'seq_length': trial.suggest_categorical('seq_length', [3, 5]),
+                'seq_length': trial.suggest_categorical('seq_length', [1, 2, 3, 5]),  # Experiment with shorter sequence lengths
                 'batch_size': trial.suggest_categorical('batch_size', [128, 256, 512]),  # Increased batch sizes
                 'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
                 'num_epochs': 20,

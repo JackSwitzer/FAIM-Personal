@@ -52,12 +52,26 @@ class DataProcessor:
 
     def preprocess_data(self):
         """Preprocess the data: handle missing values, select features, and standardize if needed."""
+        # Extract temporal features
+        self.stock_data['month'] = self.stock_data['date'].dt.month
+        self.stock_data['day_of_week'] = self.stock_data['date'].dt.dayofweek
+        self.stock_data['quarter'] = self.stock_data['date'].dt.quarter
+
+        # Optionally, encode cyclical features using sine and cosine transformations
+        self.stock_data['month_sin'] = np.sin(2 * np.pi * self.stock_data['month']/12)
+        self.stock_data['month_cos'] = np.cos(2 * np.pi * self.stock_data['month']/12)
+        self.stock_data['day_of_week_sin'] = np.sin(2 * np.pi * self.stock_data['day_of_week']/7)
+        self.stock_data['day_of_week_cos'] = np.cos(2 * np.pi * self.stock_data['day_of_week']/7)
+
         # Exclude non-feature columns
-        non_feature_cols = ["year", "month", "date", "permno", self.ret_var]
+        non_feature_cols = ["year", "month", "day_of_week", "quarter", "date", "permno", self.ret_var]
 
         # Select numeric feature columns
         numeric_cols = self.stock_data.select_dtypes(include=['number']).columns.tolist()
         self.feature_cols = [col for col in numeric_cols if col not in non_feature_cols]
+
+        # Include cyclical features in feature_cols
+        self.feature_cols.extend(['month_sin', 'month_cos', 'day_of_week_sin', 'day_of_week_cos'])
 
         # Handle missing values and ensure correct data types
         self.stock_data[self.feature_cols] = self.stock_data[self.feature_cols].fillna(0).astype('float32')
@@ -80,6 +94,8 @@ class DataProcessor:
         self.logger.info(f"Columns after preprocessing: {self.stock_data.columns.tolist()}")
         if self.ret_var not in self.stock_data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
+        
+        self.logger.info(f"Updated feature columns: {self.feature_cols}")
 
     def split_data(self):
         """
