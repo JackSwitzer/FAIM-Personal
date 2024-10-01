@@ -117,6 +117,11 @@ class DataProcessor:
         # Filter out stocks with insufficient data points
         self.filter_stocks_by_min_length()
 
+        # Additional check after filtering
+        min_length = self.stock_data.groupby('permno').size().min()
+        if min_length < Config.MIN_SEQUENCE_LENGTH:
+            self.logger.warning(f"After filtering, some stocks still have fewer than {Config.MIN_SEQUENCE_LENGTH} data points. Minimum found: {min_length}")
+
     def split_data(self):
         """
         Split data into training, validation, and test sets based on 80%-10%-10% ratios of the total data years.
@@ -264,6 +269,10 @@ class DataProcessor:
         Calculate the minimum sequence length (number of data points) across all groups (stocks)
         in the training, validation, and test datasets.
         """
+        if self.train_data is None or self.val_data is None or self.test_data is None:
+            self.logger.warning("Data has not been split yet. Returning minimum length from all data.")
+            return self.stock_data.groupby('permno').size().min()
+
         # Calculate minimum group length in training data
         train_group_lengths = self.train_data.groupby('permno').size()
         min_train_length = train_group_lengths.min() if not train_group_lengths.empty else float('inf')
@@ -284,7 +293,7 @@ class DataProcessor:
 
     def filter_stocks_by_min_length(self):
         """
-        Filter out stocks that have fewer data points than MIN_SEQUENCE_LENGTH.
+        Filter out stocks that have fewer data points than MIN_SEQUENCE_LENGTH across all datasets.
         """
         min_len = Config.MIN_SEQUENCE_LENGTH
         group_lengths = self.stock_data.groupby('permno').size()

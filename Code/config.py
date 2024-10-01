@@ -17,7 +17,7 @@ class Config:
 
     # Training settings
     NUM_EPOCHS = 1000
-    BATCH_SIZE = 128
+    BATCH_SIZE = 512
     LEARNING_RATE = 0.001
     ACCUMULATION_STEPS = 1
     CLIP_GRAD_NORM = 1.0

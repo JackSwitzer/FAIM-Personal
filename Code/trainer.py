@@ -50,7 +50,7 @@ class LSTMTrainer:
         dataloader = DataLoader(
             dataset, 
             batch_size=batch_size, 
-            shuffle=True, 
+            shuffle=False, 
             num_workers=num_workers,
             pin_memory=True
         )
@@ -323,21 +323,11 @@ class LSTMTrainer:
     def optimize_hyperparameters(self, train_data, val_data, test_data, n_trials=Config.N_TRIALS):
         """
         Optimize hyperparameters using Optuna.
-
-        Args:
-            train_data (DataFrame): Training data.
-            val_data (DataFrame): Validation data.
-            test_data (DataFrame): Test data.
-            n_trials (int): Number of trials for optimization.
-
-        Returns:
-            best_hyperparams (dict): Best hyperparameters found.
-            best_val_loss (float): Best validation loss achieved.
         """
         def objective(trial):
             hyperparams = {
-                'seq_length': trial.suggest_int('seq_length', 2, 12),  # Experiment with shorter sequence lengths
-                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),  # Increased batch sizes
+                'seq_length': trial.suggest_int('seq_length', 2, 12),
+                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),
                 'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
                 'num_epochs': Config.HYPEROPT_EPOCHS,
                 'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256]),
@@ -352,10 +342,13 @@ class LSTMTrainer:
 
             # Train the model with pruning
             try:
-                _, val_loss = self.train_model(train_data, val_data, test_data, hyperparams, trial=trial)
+                model, training_history = self.train_model(train_data, val_data, test_data, hyperparams, trial=trial)
+                
+                # Use the last validation loss as the objective value
+                last_val_loss = training_history['val_losses'][-1]
+                return last_val_loss
             except optuna.exceptions.TrialPruned:
                 raise
-            return val_loss
 
         # Setup Optuna study with pruning
         study = optuna.create_study(direction='minimize', pruner=optuna.pruners.MedianPruner())
@@ -467,7 +460,8 @@ class LSTMTrainer:
         optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
-            batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+            batch_X = batch_X.to(self.device, non_blocking=True)
+            batch_Y = batch_Y.to(self.device, non_blocking=True)
 
             with autocast(device_type=self.device.type, dtype=torch.float16):
                 outputs = model(batch_X).squeeze(-1)
@@ -484,10 +478,9 @@ class LSTMTrainer:
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)  # Reset gradients after optimizer step
 
-            batch_size = batch_Y.size(0)
-            total_loss += loss.item() * accumulation_steps * batch_size  # Adjust total loss
+            total_loss += loss.detach() * accumulation_steps * batch_Y.size(0)  # Avoid .item() inside loop
 
-        avg_loss = total_loss / len(dataloader.dataset)
+        avg_loss = total_loss.item() / len(dataloader.dataset)
         return avg_loss
 
     def _evaluate(self, model, dataloader, criterion, return_predictions=False):
@@ -498,7 +491,8 @@ class LSTMTrainer:
         targets = []
         with torch.no_grad():
             for batch_X, batch_Y in dataloader:
-                batch_X, batch_Y = batch_X.to(self.device), batch_Y.to(self.device)
+                batch_X = batch_X.to(self.device, non_blocking=True)
+                batch_Y = batch_Y.to(self.device, non_blocking=True)
                 outputs = model(batch_X).squeeze(-1)
                 loss = criterion(outputs, batch_Y)
                 batch_size = batch_Y.size(0)

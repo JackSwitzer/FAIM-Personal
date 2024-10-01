@@ -3,6 +3,7 @@ import torch
 import pandas as pd
 import numpy as np
 from torch.utils.data import DataLoader
+from config import Config
 import sys
 import os
 import traceback
@@ -291,6 +292,53 @@ class TestSequenceCreation(unittest.TestCase):
         self.assertIsNotNone(Y)
         self.assertEqual(X.shape[1], seq_length)
         self.assertEqual(X.shape[0], Y.shape[0])
+
+class TestDataProcessorFiltering(unittest.TestCase):
+    def setUp(self):
+        # Create a synthetic dataset with controlled date ranges and varying lengths
+        dates = pd.date_range(start='2021-01-01', periods=365, freq='D')
+        permnos = [10001, 10002, 10003, 10004]
+        data = []
+        for permno in permnos:
+            for date in dates[:len(dates) - permnos.index(permno) * 50]:  # Vary the length for each permno
+                data.append({
+                    'permno': permno,
+                    'date': date,
+                    'feature1': np.random.randn(),
+                    'feature2': np.random.randn(),
+                    'stock_exret': np.random.randn()
+                })
+        self.df = pd.DataFrame(data)
+        self.data_in_path = 'test_filtering_data.csv'
+        self.df.to_csv(self.data_in_path, index=False)
+
+    def test_filter_stocks_by_min_length(self):
+        Config.MIN_SEQUENCE_LENGTH = 300  # Set a minimum sequence length
+        processor = DataProcessor(self.data_in_path, standardize=False)
+        processor.load_data()
+        processor.preprocess_data()
+        
+        # Check that all remaining stocks have at least MIN_SEQUENCE_LENGTH data points
+        min_length = processor.stock_data.groupby('permno').size().min()
+        self.assertGreaterEqual(min_length, Config.MIN_SEQUENCE_LENGTH)
+        
+        # Check that stocks with insufficient data were removed
+        remaining_permnos = processor.stock_data['permno'].unique()
+        self.assertLess(len(remaining_permnos), len(self.df['permno'].unique()))
+
+    def test_get_min_group_length(self):
+        Config.MIN_SEQUENCE_LENGTH = 300  # Set a minimum sequence length
+        processor = DataProcessor(self.data_in_path, standardize=False)
+        processor.load_data()
+        processor.preprocess_data()
+        processor.split_data()
+        
+        min_group_length = processor.get_min_group_length()
+        self.assertGreaterEqual(min_group_length, Config.MIN_SEQUENCE_LENGTH)
+
+    def tearDown(self):
+        if os.path.exists(self.data_in_path):
+            os.remove(self.data_in_path)
 
 if __name__ == '__main__':
     unittest.main()
