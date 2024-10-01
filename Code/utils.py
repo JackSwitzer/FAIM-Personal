@@ -28,7 +28,7 @@ def cleanup(use_distributed=Config.USE_DISTRIBUTED):
     if use_distributed and torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
-def setup_logging(log_dir, log_filename=None):
+def setup_logging(log_dir, log_filename=None, rank=0):
     """Set up logging configuration with a unique log file name."""
     if log_filename is None:
         log_filename = f"training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -36,24 +36,28 @@ def setup_logging(log_dir, log_filename=None):
     os.makedirs(log_path, exist_ok=True)
     log_file = os.path.join(log_path, log_filename)
     
-    # Get the root logger
-    logger = logging.getLogger()
+    # Use a named logger for your application
+    logger = logging.getLogger('stock_predictor')
+    logger.setLevel(logging.INFO)
+    logger.propagate = False  # Prevent messages from propagating to the root logger
     
     # Check if handlers are already set up to avoid duplicate logs
-    if not logger.handlers:
-        logger.setLevel(logging.INFO)
+    if not getattr(logger, 'handler_set', None):
         formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
         
         # Console handler
         ch = logging.StreamHandler()
         ch.setFormatter(formatter)
-        logger.addHandler(ch)
+        if rank == 0:
+            logger.addHandler(ch)
 
         # File handler with rotation
         fh = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
         fh.setFormatter(formatter)
         logger.addHandler(fh)
         
+        logger.handler_set = True  # Custom attribute to prevent duplicate handlers
+
     logger.info(f"Logging initialized. Log file: {log_file}")
 
 def get_logger(name=None):
@@ -114,9 +118,13 @@ def check_device():
 def log_gpu_memory_usage():
     try:
         pynvml.nvmlInit()
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        logger.info(f"GPU memory: used={info.used/1024**2:.1f}MB, free={info.free/1024**2:.1f}MB, total={info.total/1024**2:.1f}MB")
+        device_count = pynvml.nvmlDeviceGetCount()
+        for i in range(device_count):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            used_memory = info.used
+            total_memory = info.total
+            logger.info(f"GPU {i} memory usage: {used_memory / (1024 ** 2):.1f} MB / {total_memory / (1024 ** 2):.1f} MB")
     except pynvml.NVMLError as e:
         logger.warning(f"Unable to log GPU memory usage: {e}")
     finally:
@@ -149,3 +157,5 @@ def set_seed(seed=Config.SEED):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False

@@ -8,6 +8,7 @@ from itertools import chain
 import logging
 
 from config import Config
+from utils import get_logger
 
 from torch.utils.data import DataLoader, Dataset
 
@@ -48,7 +49,7 @@ class DataProcessor:
     A class to handle data loading, preprocessing, transformation, and splitting.
     """
     def __init__(self, data_in_path, ret_var='stock_exret', standardize=True):
-        self.logger = logging.getLogger(__name__)  # Use module-level logger
+        self.logger = get_logger('stock_predictor')
         self.ret_var = ret_var
         self.data_in_path = data_in_path
         self.standardize = standardize

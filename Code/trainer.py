@@ -30,7 +30,7 @@ class LSTMTrainer:
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
     def __init__(self, feature_cols, target_col, device, config, rank=0, world_size=1, use_distributed=False):
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger('stock_predictor')
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.logger.info(f"Target column set to: {self.target_col}")
@@ -54,34 +54,37 @@ class LSTMTrainer:
             return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
 
     def train_model(self, train_loader, val_loader, test_loader, hyperparams, trial=None):
-        # Initialize model
-        input_size = len(self.feature_cols)
-        model = LSTMModel(input_size=input_size, **hyperparams).to(self.device)
-        if self.use_distributed:
-            model = DDP(model, device_ids=[self.rank])
-
-        # Initialize optimizer, criterion, and scheduler
-        learning_rate = hyperparams.get('learning_rate', 0.001)
-        weight_decay = hyperparams.get('weight_decay', 0.0)  # Provide a default value if not present
-        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-        criterion = nn.MSELoss()
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            factor=hyperparams.get('scheduler_factor', 0.5),
-            patience=hyperparams.get('scheduler_patience', 5)
-        )
-
-        # Load checkpoint if available
-        start_epoch, best_val_loss = self.load_checkpoint(model, optimizer, scheduler)
-
-        # Training loop
-        num_epochs = hyperparams.get('num_epochs', self.config.NUM_EPOCHS)
-        train_losses, val_losses, test_losses = [], [], []
-        best_val_loss = float('inf') if best_val_loss is None else best_val_loss
-        last_log_time = time.time()
-        total_train_time = 0
-
         try:
+            # Initialize model
+            input_size = len(self.feature_cols)
+            model = LSTMModel(input_size=input_size, **hyperparams).to(self.device)
+            if self.use_distributed:
+                model = DDP(model, device_ids=[self.rank])
+
+            # Initialize optimizer, criterion, and scheduler
+            learning_rate = hyperparams.get('learning_rate', 0.001)
+            weight_decay = hyperparams.get('weight_decay', 0.0)  # Provide a default value if not present
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            criterion = nn.MSELoss()
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                factor=hyperparams.get('scheduler_factor', 0.5),
+                patience=hyperparams.get('scheduler_patience', 5)
+            )
+
+            # Load checkpoint if available
+            start_epoch, best_val_loss = self.load_checkpoint(model, optimizer, scheduler)
+
+            # Training loop
+            num_epochs = hyperparams.get('num_epochs', self.config.NUM_EPOCHS)
+            train_losses, val_losses, test_losses = [], [], []
+            best_val_loss = float('inf') if best_val_loss is None else best_val_loss
+            last_log_time = time.time()
+            total_train_time = 0
+
+            num_batches = len(train_loader)
+            scaler = GradScaler()
+
             for epoch in range(start_epoch, num_epochs):
                 epoch_start_time = time.time()
 
@@ -92,7 +95,9 @@ class LSTMTrainer:
                     criterion,
                     optimizer,
                     clip_grad_norm=self.config.CLIP_GRAD_NORM,
-                    accumulation_steps=self.config.ACCUMULATION_STEPS
+                    accumulation_steps=self.config.ACCUMULATION_STEPS,
+                    epoch=epoch,
+                    scaler=scaler
                 )
                 train_losses.append(train_loss)
 
@@ -140,7 +145,7 @@ class LSTMTrainer:
 
                     # Log GPU and memory usage
                     log_memory_usage()
-                    log_gpu_memory()
+                    log_gpu_memory_usage()
 
                     last_log_time = current_time
 
@@ -169,14 +174,14 @@ class LSTMTrainer:
             self.logger.error(f"An error occurred during training: {str(e)}")
             self.logger.error(traceback.format_exc())
             self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
-            raise
+            raise  # Re-raise exception to handle it outside if needed
 
         finally:
             self.logger.info("Training run completed or interrupted.")
             if trial is None:
                 self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
 
-    def _train_epoch(self, model, dataloader, criterion, optimizer, clip_grad_norm=None, accumulation_steps=1):
+    def _train_epoch(self, model, dataloader, criterion, optimizer, clip_grad_norm=None, accumulation_steps=1, epoch=0):
         """Train the model for one epoch with gradient accumulation."""
         model.train()
         total_loss = 0.0
@@ -203,6 +208,23 @@ class LSTMTrainer:
                 optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.detach().item() * accumulation_steps * batch_Y.size(0)
+
+            # Save checkpoint every N batches
+            if (batch_idx + 1) % self.config.CHECKPOINT_INTERVAL == 0:
+                state = {
+                    'epoch': epoch,
+                    'batch_idx': batch_idx,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'best_val_loss': self.best_val_loss,
+                    'hyperparams': self.hyperparams
+                }
+                self.save_checkpoint(state, is_best=False, filename=f'checkpoint_epoch_{epoch}_batch_{batch_idx + 1}.pth.tar')
+
+            # Clear cache and delete unnecessary variables
+            del batch_X, batch_Y, outputs, loss
+            torch.cuda.empty_cache()
 
         avg_loss = total_loss / len(dataloader.dataset)
         return avg_loss
@@ -235,12 +257,16 @@ class LSTMTrainer:
         """
         Save a checkpoint of the model.
         """
-        save_path = os.path.join(self.model_weights_dir, filename)
-        torch.save(state, save_path)
-        if is_best:
-            best_path = os.path.join(self.model_weights_dir, 'model_best.pth.tar')
-            shutil.copyfile(save_path, best_path)
-        self.logger.info(f"Checkpoint saved to {save_path}")
+        if self.rank == 0:
+            # Synchronize processes
+            if self.use_distributed:
+                torch.distributed.barrier()
+            save_path = os.path.join(self.model_weights_dir, filename)
+            torch.save(state, save_path)
+            if is_best:
+                best_path = os.path.join(self.model_weights_dir, 'model_best.pth.tar')
+                shutil.copyfile(save_path, best_path)
+            self.logger.info(f"Checkpoint saved to {save_path}")
 
     def save_training_metrics(self, train_losses, val_losses, test_losses):
         metrics = {
@@ -357,9 +383,12 @@ class LSTMTrainer:
                 self.logger.error(traceback.format_exc())
                 raise
 
-        # Setup Optuna study with pruning
+        # Existing code to run the study
         study = optuna.create_study(direction='minimize', pruner=optuna.pruners.MedianPruner())
         study.optimize(objective, n_trials=n_trials)
+
+        # After the trial, save the best hyperparameters
+        self.save_hyperparams(self.best_hyperparams, is_best=True)
 
         # Store and return best hyperparameters
         self.best_hyperparams = study.best_params
@@ -407,10 +436,11 @@ class LSTMTrainer:
 
     def save_hyperparams(self, hyperparams, is_best=False):
         # Adjust method to save hyperparameters for the single target variable
-        filename = "best_hyperparams.json" if is_best else "hyperparams.json"
+        filename = 'best_hyperparams.json' if is_best else f"hyperparams_trial_{self.current_trial}.json"
         filepath = os.path.join(self.out_dir, filename)
         with open(filepath, 'w') as f:
-            json.dump(hyperparams, f)
+            json.dump(hyperparams, f, indent=4)
+        self.logger.info(f"Hyperparameters saved to {filepath}")
 
     def load_checkpoint(self, model, optimizer, scheduler=None):
         """

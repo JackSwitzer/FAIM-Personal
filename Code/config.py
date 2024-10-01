@@ -29,6 +29,7 @@ class Config:
     CLIP_GRAD_NORM = 1.0
     USE_ALL_DATA = True
     NUM_WORKERS = 2  # CHANGE TO 4 or 8 WHEN TESTING
+    CHECKPOINT_INTERVAL = 100
 
     # LSTM hyperparameters 
     LSTM_PARAMS = {
