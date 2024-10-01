@@ -9,6 +9,7 @@ import importlib
 import pynvml
 from packaging import version
 from datetime import datetime
+from config import Config
 
 # Create a global logger
 logger = logging.getLogger('stock_predictor')
@@ -17,30 +18,34 @@ logger.setLevel(logging.INFO)
 def setup_logging(out_dir, level=logging.INFO):
     """Set up logging configuration with a unique log file name."""
     global logger
-    if not logger.handlers:
-        # Create log directory
-        log_dir = os.path.join(out_dir, "logs")
-        os.makedirs(log_dir, exist_ok=True)
 
-        # Use system time at the start of the run
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = os.path.join(log_dir, f"training_{timestamp}.log")
+    # Remove all handlers associated with the logger object
+    if logger.hasHandlers():
+        logger.handlers.clear()
 
-        # File handler
-        fh = logging.FileHandler(log_file)
-        fh.setLevel(level)
-        fh.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
+    # Create log directory
+    log_dir = os.path.join(out_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
 
-        # Stream handler
-        ch = logging.StreamHandler()
-        ch.setLevel(level)
-        ch.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
+    # Use system time at the start of the run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"training_{timestamp}.log")
 
-        # Add handlers to the logger
-        logger.addHandler(fh)
-        logger.addHandler(ch)
+    # File handler
+    fh = logging.FileHandler(log_file)
+    fh.setLevel(level)
+    fh.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
 
-        logger.info(f"Logging initialized. Log file: {log_file}")
+    # Stream handler
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s'))
+
+    # Add handlers to logger
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+
+    logger.info(f"Logging initialized. Log file: {log_file}")
 
 def get_logger():
     """Retrieve the global logger instance."""
@@ -119,7 +124,7 @@ def log_gpu_memory():
         logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
 
-def set_seed(seed=42):
+def set_seed(seed=Config.SEED):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

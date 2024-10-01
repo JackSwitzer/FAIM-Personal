@@ -8,23 +8,50 @@ from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
 from sklearn.model_selection import cross_val_score
 
 from utils import get_logger
+from config import Config
 
 class SequenceDataset(Dataset):
     def __init__(self, data, seq_length, feature_cols, target_col):
-        self.data = data.reset_index(drop=True)  # Ensure unique indices
+        self.logger = get_logger()
         self.seq_length = seq_length
         self.feature_cols = feature_cols
         self.target_col = target_col
+
+        # Sort data and reset index
+        data = data.sort_values(['permno', 'date']).reset_index(drop=True)
+
+        # Store features and target as NumPy arrays for efficient access
+        self.data_features = data[self.feature_cols].values.astype(np.float32)
+        self.data_target = data[self.target_col].values.astype(np.float32)
+        self.permno_array = data['permno'].values
+
+        # Initialize self.indices
         self.indices = self._create_indices()
+        self.logger.info(f"Number of sequences: {len(self.indices):,}")
 
     def _create_indices(self):
         indices = []
-        grouped = self.data.groupby('permno')
-        for _, group in grouped:
-            group_length = len(group)
-            if group_length >= self.seq_length:
-                indices.extend([(group.index[i], group.index[i+self.seq_length-1]) 
-                                for i in range(group_length - self.seq_length + 1)])
+        permno = self.permno_array
+        seq_length = self.seq_length
+        total_length = len(permno)
+
+        start_idx = 0
+        while start_idx < total_length - seq_length + 1:
+            current_permno = permno[start_idx]
+            end_idx = start_idx
+
+            # Find the subsequence where permno remains the same
+            while end_idx < total_length and permno[end_idx] == current_permno:
+                end_idx += 1
+
+            group_length = end_idx - start_idx
+
+            if group_length >= seq_length:
+                for i in range(start_idx, end_idx - seq_length + 1):
+                    indices.append((i, i + seq_length - 1))
+
+            start_idx = end_idx
+
         return indices
 
     def __len__(self):
@@ -32,9 +59,9 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         start_idx, end_idx = self.indices[idx]
-        seq = self.data.loc[start_idx:end_idx, self.feature_cols].values
-        target = self.data.loc[end_idx, self.target_col]
-        return torch.tensor(seq, dtype=torch.float32), torch.tensor(target, dtype=torch.float32)
+        seq = self.data_features[start_idx:end_idx + 1]
+        target = self.data_target[end_idx]
+        return torch.from_numpy(seq), torch.tensor(target, dtype=torch.float32)
 
 class RegressionModels:
     """
@@ -170,43 +197,67 @@ class LSTMModel(nn.Module):
     LSTM Model for time series prediction.
     Includes optimizations for efficient training on large datasets.
     """
-    def __init__(
-        self, input_size, hidden_size=128, num_layers=2, dropout_rate=0.2,
-        bidirectional=False, use_batch_norm=True, activation_function='LeakyReLU',
-        fc1_size=64, fc2_size=32
-    ):
+    def __init__(self, input_size, **kwargs):
         super(LSTMModel, self).__init__()
-        self.use_batch_norm = use_batch_norm
-        self.bidirectional = bidirectional
+        
+        # Use Config defaults if not provided in kwargs
+        params = Config.get_lstm_params()
+        params.update(kwargs)
+        
+        self.hidden_size = params['hidden_size']
+        self.num_layers = params['num_layers']
+        self.dropout_rate = params['dropout_rate']
+        self.bidirectional = params['bidirectional']
+        self.use_batch_norm = params['use_batch_norm']
+        self.activation_function = params['activation_function']
+        self.fc1_size = params['fc1_size']
+        self.fc2_size = params['fc2_size']
+
+        self.use_batch_norm = self.use_batch_norm
+        self.bidirectional = self.bidirectional
 
         # LSTM Layer
         self.lstm = nn.LSTM(
-            input_size, hidden_size, num_layers,
-            batch_first=True, dropout=dropout_rate,
-            bidirectional=bidirectional
+            input_size, self.hidden_size, self.num_layers,
+            batch_first=True, dropout=self.dropout_rate,
+            bidirectional=self.bidirectional
         )
-        lstm_output_size = hidden_size * (2 if bidirectional else 1)
+        lstm_output_size = self.hidden_size * (2 if self.bidirectional else 1)
 
         # Batch Normalization Layer
-        if use_batch_norm:
+        if self.use_batch_norm:
             self.batch_norm = nn.BatchNorm1d(lstm_output_size)
 
         # Fully Connected Layers
-        self.fc1 = nn.Linear(lstm_output_size, fc1_size)
-        self.fc2 = nn.Linear(fc1_size, fc2_size)
-        self.fc3 = nn.Linear(fc2_size, 1)
+        self.fc1 = nn.Linear(lstm_output_size, self.fc1_size)
+        self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
+        self.fc3 = nn.Linear(self.fc2_size, 1)
 
         # Activation and Dropout Layers
-        if activation_function == 'ReLU':
+        if self.activation_function == 'ReLU':
             self.activation = nn.ReLU()
-        elif activation_function == 'LeakyReLU':
+        elif self.activation_function == 'LeakyReLU':
             self.activation = nn.LeakyReLU()
-        elif activation_function == 'ELU':
+        elif self.activation_function == 'ELU':
             self.activation = nn.ELU()
         else:
             self.activation = nn.ReLU()  # Default to ReLU
         
-        self.dropout = nn.Dropout(p=dropout_rate)
+        self.dropout = nn.Dropout(p=self.dropout_rate)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear) or isinstance(m, nn.Conv1d):
+            nn.init.kaiming_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LSTM):
+            for name, param in m.named_parameters():
+                if 'weight' in name:
+                    nn.init.orthogonal_(param)
+                elif 'bias' in name:
+                    nn.init.zeros_(param)
 
     def forward(self, x):
         # LSTM forward pass

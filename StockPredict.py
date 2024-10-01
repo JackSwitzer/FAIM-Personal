@@ -2,6 +2,7 @@ import os
 import traceback
 import pandas as pd
 import torch.nn as nn
+from config import Config
 
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
@@ -84,30 +85,28 @@ def main_Regression():
         logger.info("Regression run completed.")
 
 def main():
-    out_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
-    model_weights_dir = os.path.join(out_dir, "model_weights")
-    os.makedirs(model_weights_dir, exist_ok=True)
-    setup_logging(out_dir)
+    # Initialize logging only once at the start
+    setup_logging(Config.OUT_DIR)
     logger = get_logger()
-
-    set_seed()
+    
+    os.makedirs(Config.MODEL_WEIGHTS_DIR, exist_ok=True)
+    set_seed(Config.SEED)
     clear_gpu_memory()
     check_torch_version()
     device = check_device()
     data_input_dir = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"
     full_data_path = os.path.join(data_input_dir, "hackathon_sample_v2.csv")
 
-    target_variable = 'stock_exret'
+    target_variable = Config.TARGET_VARIABLE
     logger.info(f"Target variable set to: {target_variable}")
 
     try:
         # Data processing
-        data_processor = DataProcessor(full_data_path, target_variable, standardize=True)
+        data_processor = DataProcessor(Config.FULL_DATA_PATH, Config.TARGET_VARIABLE, standardize=Config.STANDARDIZE)
         data_processor.load_data()
         data_processor.preprocess_data()
         data_processor.split_data()
 
-        # Log group lengths only once
         min_group_length = min(
             data_processor.train_data.groupby('permno').size().min(),
             data_processor.val_data.groupby('permno').size().min(),
@@ -121,11 +120,9 @@ def main():
                     f"Val: {len(data_processor.val_data)}, "
                     f"Test: {len(data_processor.test_data)}")
 
-        log_memory_usage()
-        log_gpu_memory()
-
         # Initialize LSTM Trainer
-        lstm_trainer = LSTMTrainer(feature_cols, target_variable, device, out_dir=out_dir, model_weights_dir=model_weights_dir)
+        lstm_trainer = LSTMTrainer(feature_cols, Config.TARGET_VARIABLE, device, 
+                                   out_dir=Config.OUT_DIR, model_weights_dir=Config.MODEL_WEIGHTS_DIR)
 
         # Load best hyperparameters or optimize if not available
         best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
@@ -134,7 +131,8 @@ def main():
             best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
                 data_processor.train_data,
                 data_processor.val_data,
-                n_trials=200
+                data_processor.test_data,  # Add this line
+                n_trials=Config.N_TRIALS
             )
             if best_hyperparams is None:
                 logger.error("Hyperparameter optimization failed. Exiting.")
@@ -146,24 +144,24 @@ def main():
             logger.info(f"Adjusted sequence length to: {best_hyperparams['seq_length']} due to minimum group length.")
 
         # Make use_all_data configurable
-        use_all_data = True  # Set this based on your requirements
+        use_all_data = Config.USE_ALL_DATA  # Add this to your Config class
         if use_all_data:
             logger.info("Using train and validation data for final training...")
-            # Combine train and val data
             all_train_data = pd.concat([data_processor.train_data, data_processor.val_data])
             data_processor.train_data = all_train_data
             data_processor.val_data = None  # No validation during final training
-            # Test data remains the same for evaluation
         else:
             logger.info("Using train data only for final training...")
 
         # Start final training
         logger.info(f"Starting final LSTM model training with hyperparameters: {best_hyperparams}")
-        model, _ = lstm_trainer.train_model(data_processor.train_data, data_processor.val_data, data_processor.test_data, best_hyperparams.copy())
+        model, training_history = lstm_trainer.train_model(
+            data_processor.train_data, 
+            data_processor.val_data, 
+            data_processor.test_data,  # Make sure this is passed
+            best_hyperparams.copy()
+        )
         logger.info("Final LSTM model training completed.")
-
-        log_memory_usage()
-        log_gpu_memory()
 
         # Evaluate on test set
         test_loader = lstm_trainer._create_dataloader(
@@ -195,7 +193,7 @@ def main():
         logger.info(f'LSTM OOS R2: {r2_lstm:.4f}')
 
         # Save LSTM predictions
-        save_csv(reg_pred_lstm, out_dir, 'lstm_predictions.csv')
+        save_csv(reg_pred_lstm, Config.OUT_DIR, 'lstm_predictions.csv')
 
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")

@@ -5,6 +5,7 @@ from multiprocessing import Pool
 from itertools import chain
 
 from utils import get_logger
+from config import Config
 
 class DataProcessor:
     """
@@ -80,63 +81,84 @@ class DataProcessor:
         if self.ret_var not in self.stock_data.columns:
             self.logger.error(f"Target column '{self.ret_var}' not found in the data.")
 
-    def split_data(self, train_pct=0.8, val_pct=0.1, test_pct=0.1):
-        """Split data into training, validation, and test sets."""
-        if train_pct + val_pct + test_pct != 1.0:
-            self.logger.warning("Split percentages do not sum to 1. Using default values.")
-            train_pct, val_pct, test_pct = 0.8, 0.1, 0.1
+    def split_data(self):
+        """
+        Split data into training, validation, and test sets based on 80%-10%-10% ratios of the total data years.
+        """
+        try:
+            self.train_data, self.val_data, self.test_data = self._time_based_split()
+            
+            # Log split sizes
+            self.logger.info(f"Data split completed. Train size: {len(self.train_data)}, "
+                             f"Validation size: {len(self.val_data)}, "
+                             f"Test size: {len(self.test_data)}")
+        except Exception as e:
+            self.logger.error(f"Error occurred during data splitting: {str(e)}")
+            raise
 
-        self.train_data, self.val_data, self.test_data = self._time_based_split(train_pct, val_pct, test_pct)
-        
-        # Reset indices after splitting and ensure they are unique
-        self.train_data = self.train_data.reset_index(drop=True)
-        self.val_data = self.val_data.reset_index(drop=True)
-        self.test_data = self.test_data.reset_index(drop=True)
-        
-        # Add logging to verify data splits
-        self.logger.info(f"Data split completed.")
-        self.logger.info(f"Train data size: {len(self.train_data)}, Validation data size: {len(self.val_data)}, Test data size: {len(self.test_data)}")
-        self.logger.info(f"Number of unique 'permno' in train data: {self.train_data['permno'].nunique()}")
-        self.logger.info(f"Number of unique 'permno' in validation data: {self.val_data['permno'].nunique()}")
-        self.logger.info(f"Number of unique 'permno' in test data: {self.test_data['permno'].nunique()}")
-
-    def _time_based_split(self, train_pct, val_pct, test_pct):
-        """Split data based on predefined time periods."""
+    def _time_based_split(self):
+        """
+        Split data based on time, using 80%-10%-10% ratios for training, validation, and testing,
+        rounded to the nearest year.
+        """
         data = self.stock_data.copy()
-        data.sort_values(['permno', 'date'], inplace=True)
+        data.sort_values(['date', 'permno'], inplace=True)
 
         # Get the minimum and maximum dates
         min_date = data['date'].min()
         max_date = data['date'].max()
-        self.logger.info(f"Data date range: {min_date} to {max_date}")
+        self.logger.info(f"Data date range: {min_date.date()} to {max_date.date()}")
 
-        # Calculate the total time span
-        total_span = (max_date - min_date).days
+        # Calculate total number of years and round to the nearest integer
+        total_years = int(round((max_date - min_date).days / 365.25))
+        if total_years == 0:
+            total_years = 1  # Ensure at least one year
+
+        # Define ratios
+        train_ratio = 0.8
+        val_ratio = 0.1
+
+        # Calculate number of years for each split, rounding to the nearest year
+        train_years = int(round(total_years * train_ratio))
+        val_years = int(round(total_years * val_ratio))
+        test_years = total_years - train_years - val_years
+
+        # Adjust if the sum does not equal total_years due to rounding
+        if train_years + val_years + test_years < total_years:
+            test_years += total_years - (train_years + val_years + test_years)
+
+        self.logger.info(f"Total years: {total_years}")
+        self.logger.info(f"Train years: {train_years}, Validation years: {val_years}, Test years: {test_years}")
 
         # Calculate split dates
-        train_days = int(total_span * train_pct)
-        val_days = int(total_span * val_pct)
+        train_end_date = min_date + pd.DateOffset(years=train_years)
+        val_end_date = train_end_date + pd.DateOffset(years=val_years)
 
-        train_end_date = min_date + pd.Timedelta(days=train_days)
-        val_end_date = train_end_date + pd.Timedelta(days=val_days)
-
-        # Adjust dates to actual available dates
-        train_end_date = data[data['date'] >= train_end_date].iloc[0]['date']
-        val_end_date = data[data['date'] >= val_end_date].iloc[0]['date']
+        # Adjust dates to the actual available dates in the dataset
+        train_end_date = data[data['date'] >= train_end_date]['date'].min()
+        val_end_date = data[data['date'] >= val_end_date]['date'].min()
 
         self.logger.info(f"Train date range: {min_date.date()} to {train_end_date.date()}")
         self.logger.info(f"Validation date range: {train_end_date.date()} to {val_end_date.date()}")
         self.logger.info(f"Test date range: {val_end_date.date()} to {max_date.date()}")
 
-        # Split the data
+        # Perform the split
         train_data = data[data['date'] < train_end_date].copy()
         val_data = data[(data['date'] >= train_end_date) & (data['date'] < val_end_date)].copy()
         test_data = data[data['date'] >= val_end_date].copy()
 
-        # Reset index for each split to ensure unique indices
+        # Reset index for each split
         train_data.reset_index(drop=True, inplace=True)
         val_data.reset_index(drop=True, inplace=True)
         test_data.reset_index(drop=True, inplace=True)
+
+        # Log the actual split sizes in years
+        actual_train_years = (train_end_date - min_date).days / 365.25
+        actual_val_years = (val_end_date - train_end_date).days / 365.25
+        actual_test_years = (max_date - val_end_date).days / 365.25
+
+        self.logger.info(f"Actual split (in years): Train: {actual_train_years:.2f}, "
+                         f"Validation: {actual_val_years:.2f}, Test: {actual_test_years:.2f}")
 
         return train_data, val_data, test_data
 
