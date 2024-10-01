@@ -7,7 +7,8 @@ import gc
 import sys
 import importlib
 import pynvml
-from torch.distributed import ReduceOp
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from packaging import version
 from datetime import datetime
 from config import Config
@@ -16,6 +17,14 @@ from logging.handlers import RotatingFileHandler
 # Create a global logger
 logger = logging.getLogger('stock_predictor')
 logger.setLevel(logging.INFO)
+
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 def setup_logging(log_dir, log_filename=None):
     """Set up logging configuration with a unique log file name."""
@@ -88,7 +97,10 @@ def clear_import_cache():
 def check_device():
     if torch.cuda.is_available():
         device = torch.device("cuda")
-        logger.info(f"Using CUDA. GPU: {torch.cuda.get_device_name(0)}")
+        n_gpus = torch.cuda.device_count()
+        logger.info(f"Using CUDA. Number of GPUs: {n_gpus}")
+        for i in range(n_gpus):
+            logger.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
         logger.info("Using MPS (Metal Performance Shaders) on macOS.")

@@ -12,11 +12,15 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 import pandas as pd
 import optuna
 from tqdm import tqdm
 
-from models import LSTMModel, SequenceDataset
+from models import LSTMModel
+from data_processor import SequenceDataset
 from utils import *
 from config import Config
 
@@ -36,6 +40,8 @@ class LSTMTrainer:
         self.best_hyperparams = None  # To store the best hyperparameters
         os.makedirs(self.out_dir, exist_ok=True)  # Ensure output directory exists
         os.makedirs(self.model_weights_dir, exist_ok=True)  # Ensure model weights directory exists
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
 
     def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
         """
@@ -47,12 +53,14 @@ class LSTMTrainer:
             self.feature_cols, 
             self.target_col
         )
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset)
         dataloader = DataLoader(
             dataset, 
             batch_size=batch_size, 
             shuffle=False, 
             num_workers=num_workers,
-            pin_memory=True
+            pin_memory=True,
+            sampler=sampler
         )
         return dataloader
 
@@ -89,6 +97,9 @@ class LSTMTrainer:
         # Initialize model
         input_size = len(self.feature_cols)  # Updated feature dimension
         model = LSTMModel(input_size=input_size, **lstm_params).to(self.device)
+
+        # Wrap model in DDP
+        model = DDP(model, device_ids=[self.rank])
 
         # Set up optimizer
         optimizer_name = hyperparams.get('optimizer_name', 'Adam')
@@ -476,11 +487,12 @@ class LSTMTrainer:
 
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad(set_to_none=True)  # Reset gradients after optimizer step
+                optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.detach() * accumulation_steps * batch_Y.size(0)  # Avoid .item() inside loop
 
-        avg_loss = total_loss.item() / len(dataloader.dataset)
+        #  avg_loss = total_loss.item() / len(dataloader.dataset)
+        avg_loss = total_loss / len(dataloader.dataset)
         return avg_loss
 
     def _evaluate(self, model, dataloader, criterion, return_predictions=False):

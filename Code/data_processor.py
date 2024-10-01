@@ -1,3 +1,5 @@
+
+import torch
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
@@ -5,8 +7,42 @@ from multiprocessing import Pool
 from itertools import chain
 import logging
 
-from utils import get_logger
 from config import Config
+
+from torch.utils.data import DataLoader, Dataset
+
+class SequenceDataset(Dataset):
+    def __init__(self, data, seq_length, feature_cols, target_col):
+        self.data = data
+        self.seq_length = seq_length
+        self.feature_cols = feature_cols
+        self.target_col = target_col
+        self.indices = self._create_indices()
+
+    def _create_indices(self):
+        data = self.data.sort_values(['permno', 'date'])
+        grouped = data.groupby('permno')
+        indices = []
+        for _, group in grouped:
+            group_length = len(group)
+            if group_length < self.seq_length:
+                continue
+            group_indices = group.index.values
+            for i in range(group_length - self.seq_length + 1):
+                start_idx = group_indices[i]
+                end_idx = group_indices[i + self.seq_length - 1]
+                indices.append((start_idx, end_idx))
+        return indices
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        start_idx, end_idx = self.indices[idx]
+        seq_data = self.data.iloc[start_idx:end_idx+1]
+        seq = seq_data[self.feature_cols].values.astype(np.float32)
+        target = seq_data[self.target_col].values[-1].astype(np.float32)
+        return torch.from_numpy(seq), torch.tensor(target)
 
 class DataProcessor:
     """
@@ -114,13 +150,19 @@ class DataProcessor:
         
         self.logger.debug(f"Updated feature columns: {self.feature_cols}")
 
-        # Filter out stocks with insufficient data points
-        self.filter_stocks_by_min_length()
+         # Filter out stocks with insufficient data points
+        total_stocks_before = self.stock_data['permno'].nunique()
+        self.logger.info(f"Total stocks before filtering: {total_stocks_before}")
 
-        # Additional check after filtering
-        min_length = self.stock_data.groupby('permno').size().min()
-        if min_length < Config.MIN_SEQUENCE_LENGTH:
-            self.logger.warning(f"After filtering, some stocks still have fewer than {Config.MIN_SEQUENCE_LENGTH} data points. Minimum found: {min_length}")
+        # After filtering
+        self.filter_stocks_by_min_length()
+        total_stocks_after = self.stock_data['permno'].nunique()
+        self.logger.info(f"Total stocks after filtering: {total_stocks_after}")
+
+        # Checking minimum lengths
+        group_lengths = self.stock_data.groupby('permno').size()
+        min_length = group_lengths.min()
+        self.logger.info(f"Minimum group length after filtering: {min_length}")
 
     def split_data(self):
         """
@@ -301,3 +343,7 @@ class DataProcessor:
         self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)].copy()
         self.logger.info(f"Filtered stocks with at least {min_len} data points.")
         self.logger.info(f"Remaining stocks: {len(valid_permnos)}")
+
+    def create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
+        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.ret_var)
+        return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)

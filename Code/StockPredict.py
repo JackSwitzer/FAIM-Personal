@@ -9,7 +9,8 @@ from trainer import LSTMTrainer
 from utils import *
 from models import RegressionModels
 
-def main_Regression():
+def main_Regression(rank, world_size):
+    setup(rank, world_size)
     out_dir = Config.OUT_DIR
     setup_logging(out_dir)
     logger = logging.getLogger(__name__)  # Use module-level logger
@@ -82,10 +83,11 @@ def main_Regression():
         logger.error(f"An error occurred: {str(e)}")
         logger.error(traceback.format_exc())
     finally:
-        # Cleanup
+        cleanup()
         logger.info("Regression run completed.")
 
-def main():
+def main(rank, world_size):
+    setup(rank, world_size)
     try:
         setup_logging(Config.OUT_DIR)
         logger = logging.getLogger(__name__)  # Use module-level logger
@@ -121,7 +123,9 @@ def main():
         if min_group_length < Config.MIN_SEQUENCE_LENGTH:
             logger.warning(
                 f"The minimum group length {min_group_length} is less than the required sequence length."
+                f" Adjusting sequence length to {min_group_length}."
             )
+            Config.LSTM_PARAMS['seq_length'] = min_group_length
 
         # Load best hyperparameters or optimize if not available
         best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
@@ -191,6 +195,9 @@ def main():
         clear_gpu_memory()
 
 if __name__ == "__main__":
+    world_size = Config.NUM_NODES * Config.GPUS_PER_NODE
+    torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size, join=True)
+    
     try:
         main()
         # main_Regression()

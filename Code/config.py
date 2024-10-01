@@ -13,7 +13,7 @@ class Config:
     # Data processing settings
     TARGET_VARIABLE = 'stock_exret'
     STANDARDIZE = True
-    MIN_SEQUENCE_LENGTH = 10
+    MIN_SEQUENCE_LENGTH = 5
 
     # Training settings
     NUM_EPOCHS = 1000
@@ -50,6 +50,18 @@ class Config:
 
     # Logging settings
     LOG_INTERVAL = 5  # Log every 5 epochs
+
+    # Cluster-specific settings
+    # NUM_NODES = 4  # Number of nodes in the cluster
+    # GPUS_PER_NODE = 4  # Number of GPUs per node
+    # DISTRIBUTED_BACKEND = 'nccl'  # or 'gloo' depending on your setup
+    
+    # Adjust these based on cluster capabilities
+    # NUM_WORKERS = 8  # Increase for more parallel data loading
+    # BATCH_SIZE = 1024  # Increase for larger memory capacity
+    
+    # Enable mixed precision training
+    # USE_MIXED_PRECISION = True
 
     @classmethod
     def update(cls, **kwargs):
