@@ -16,15 +16,20 @@ class SequenceDataset(Dataset):
     def __init__(self, data, seq_length, feature_cols, target_col):
         # Reset index to ensure consistency
         data = data.sort_values(['permno', 'date']).reset_index(drop=True)
-        self.data = data
         self.seq_length = seq_length
         self.feature_cols = feature_cols
         self.target_col = target_col
-        self.indices = self._create_indices()
+        self.indices = self._create_indices(data)
+        
+        # Convert the necessary data to NumPy arrays
+        self.features = data[self.feature_cols].values.astype(np.float32)
+        self.targets = data[self.target_col].values.astype(np.float32)
+        self.permnos = data['permno'].values
+        self.dates = data['date'].values
 
-    def _create_indices(self):
+    def _create_indices(self, data):
         indices = []
-        grouped = self.data.groupby('permno', as_index=False, sort=False)
+        grouped = data.groupby('permno', as_index=False, sort=False)
         for _, group in grouped:
             group_indices = group.index.to_list()
             num_sequences = len(group_indices) - self.seq_length + 1
@@ -41,9 +46,8 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         start_idx, end_idx = self.indices[idx]
-        seq_data = self.data.iloc[start_idx:end_idx + 1]
-        seq = seq_data[self.feature_cols].values.astype(np.float32)
-        target = seq_data[self.target_col].values[-1].astype(np.float32)
+        seq = self.features[start_idx:end_idx + 1]
+        target = self.targets[end_idx]  # Target at the last time step
         return torch.from_numpy(seq), torch.tensor(target)
 
 class DataProcessor:

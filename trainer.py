@@ -55,35 +55,31 @@ class LSTMTrainer:
 
     def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
         if data is None or data.empty:
-            self.logger.error(f"Attempted to create DataLoader with empty or None dataset.")
+            self.logger.error("Attempted to create DataLoader with empty or None dataset.")
             raise ValueError("Cannot create DataLoader with empty or None dataset.")
         
         dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
         if len(dataset) == 0:
-            self.logger.error(f"SequenceDataset is empty. Check your data and sequence length.")
+            self.logger.error("SequenceDataset is empty. Check your data and sequence length.")
             raise ValueError("SequenceDataset is empty. Cannot create DataLoader.")
+        
+        data_loader_args = {
+            'dataset': dataset,
+            'batch_size': batch_size,
+            'num_workers': num_workers,
+            'pin_memory': True,
+            'shuffle': False 
+        }
         
         if self.use_distributed:
             sampler = DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank)
-            return DataLoader(
-                dataset,
-                batch_size=batch_size,
-                sampler=sampler,
-                num_workers=num_workers,
-                pin_memory=True,
-                prefetch_factor=2,
-                persistent_workers=True
-            )
+            data_loader_args['sampler'] = sampler
         else:
-            return DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=num_workers,
-                pin_memory=True,
-                prefetch_factor=2,
-                persistent_workers=True
-            )
+            if num_workers > 0:
+                data_loader_args['prefetch_factor'] = 2
+                data_loader_args['persistent_workers'] = True
+
+        return DataLoader(**data_loader_args)
 
     def train_model(self, train_loader, val_loader, test_loader, hyperparams, trial=None):
         try:

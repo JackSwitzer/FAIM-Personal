@@ -4,6 +4,8 @@ import traceback
 import os
 import torch
 import optuna
+import json
+
 import torch.nn as nn
 from torch.utils.data import Dataset
 from sklearn.linear_model import LinearRegression, Lasso, Ridge, ElasticNet
@@ -72,18 +74,19 @@ class RegressionModels:
             self.logger.info(f"Model '{model_name}' saved to: {file_path}")
         except Exception as e:
             self.logger.error(f"Failed to save model '{model_name}': {str(e)}")
+            self.logger.error(traceback.format_exc())
     
-    def save_hyperparams(self, model_name, hyperparams):
-        """Save hyperparameters to a JSON file with a unique name."""
-        import json
+    def save_hyperparams(self, model_name, hyperparams, is_best=False):
+        """Save the hyperparameters to a JSON file."""
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            file_path = os.path.join(self.out_dir, f"{model_name}_hyperparams_{timestamp}.json")
+            file_name = f"{model_name}_hyperparams.json" if not is_best else f"{model_name}_best_hyperparams.json"
+            file_path = os.path.join(self.out_dir, file_name)
             with open(file_path, 'w') as f:
-                json.dump(hyperparams, f, indent=2)
-            self.logger.info(f"Hyperparameters for {model_name} saved to: {file_path}")
+                json.dump(hyperparams, f, indent=4)
+            self.logger.info(f"Hyperparameters for '{model_name}' saved to: {file_path}")
         except Exception as e:
             self.logger.error(f"Failed to save hyperparameters for '{model_name}': {str(e)}")
+            self.logger.error(traceback.format_exc())
     
     def optimize_lasso_hyperparameters(self, X_train, Y_train_dm, n_trials=100):
         """Optimize Lasso hyperparameters using Optuna."""
@@ -149,8 +152,7 @@ class RegressionModels:
                 l1_ratio = trial.suggest_float('l1_ratio', 0.0, 1.0)
                 max_iter = trial.suggest_int('max_iter', 1000, 100000)
                 tol = trial.suggest_float('tol', 1e-6, 1e-1, log=True)
-                en = ElasticNet(fit_intercept=False, alpha=alpha, l1_ratio=l1_ratio,
-                                max_iter=max_iter, tol=tol)
+                en = ElasticNet(fit_intercept=False, alpha=alpha, l1_ratio=l1_ratio, max_iter=max_iter, tol=tol)
                 scores = cross_val_score(en, X_train, Y_train_dm, cv=5,
                                          scoring='neg_mean_squared_error', n_jobs=-1)
                 return -scores.mean()

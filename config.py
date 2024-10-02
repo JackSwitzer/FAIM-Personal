@@ -26,8 +26,8 @@ class Config:
 
     # Training settings
     NUM_EPOCHS = 1000  # Full training run epochs
-    BATCH_SIZE = 2048  # Batch size
-    ACCUMULATION_STEPS = 2  # Gradient accumulation steps
+    BATCH_SIZE = 1024  # Batch size
+    ACCUMULATION_STEPS = 1  # Gradient accumulation steps
     CLIP_GRAD_NORM = 1.0
     USE_ALL_DATA = True
     NUM_WORKERS = max(1, multiprocessing.cpu_count() - 1)
@@ -46,8 +46,8 @@ class Config:
         'optimizer_name': 'Adam',
         'learning_rate': 0.001,
         'weight_decay': 1e-6,
-        'seq_length': 10,
-        'batch_size': BATCH_SIZE,
+        'seq_length': 10,  # This can be tuned if desired
+        'batch_size': BATCH_SIZE,  # Use config value instead of tuning
         'use_scheduler': True,
         'scheduler_factor': 0.5,
         'scheduler_patience': 5
