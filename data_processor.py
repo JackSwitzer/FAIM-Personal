@@ -1,4 +1,3 @@
-
 import torch
 import pandas as pd
 import numpy as np
@@ -23,15 +22,17 @@ class SequenceDataset(Dataset):
         self.indices = self._create_indices()
 
     def _create_indices(self):
-        grouped = self.data.groupby('permno', as_index=False)
         indices = []
+        grouped = self.data.groupby('permno', as_index=False, sort=False)
         for _, group in grouped:
-            group_length = len(group)
-            if group_length < self.seq_length:
+            group_indices = group.index.to_list()
+            num_sequences = len(group_indices) - self.seq_length + 1
+            if num_sequences <= 0:
                 continue
-            start_positions = range(group.index[0], group.index[-1] - self.seq_length + 2)
-            for pos in start_positions:
-                indices.append((pos, pos + self.seq_length - 1))
+            for i in range(num_sequences):
+                start_idx = group_indices[i]
+                end_idx = start_idx + self.seq_length - 1
+                indices.append((start_idx, end_idx))
         return indices
 
     def __len__(self):
@@ -154,15 +155,10 @@ class DataProcessor:
         total_stocks_before = self.stock_data['permno'].nunique()
         self.logger.info(f"Total stocks before filtering: {total_stocks_before}")
 
-        # After filtering
-        self.filter_stocks_by_min_length()
-        total_stocks_after = self.stock_data['permno'].nunique()
-        self.logger.info(f"Total stocks after filtering: {total_stocks_after}")
-
         # Checking minimum lengths
         group_lengths = self.stock_data.groupby('permno').size()
         min_length = group_lengths.min()
-        self.logger.info(f"Minimum group length after filtering: {min_length}")
+        self.logger.info(f"Minimum group length after preprocessing: {min_length}")
 
     def split_data(self):
         """
@@ -333,40 +329,27 @@ class DataProcessor:
         self.logger.info(f"Minimum group lengths - Train: {min_train_length}, Validation: {min_val_length}, Test: {min_test_length}")
         return min_group_length
 
-    def filter_stocks_by_min_length(self):
-        """
-        Filter out stocks that have fewer data points than MIN_SEQUENCE_LENGTH across all datasets.
-        """
-        min_len = Config.MIN_SEQUENCE_LENGTH
-        group_lengths = self.stock_data.groupby('permno').size()
-        valid_permnos = group_lengths[group_lengths >= min_len].index
-        self.stock_data = self.stock_data[self.stock_data['permno'].isin(valid_permnos)].copy()
-        self.logger.info(f"Filtered stocks with at least {min_len} data points.")
-        self.logger.info(f"Remaining stocks: {len(valid_permnos)}")
+    def filter_stocks_by_min_length_in_splits(self):
+       min_len = self.seq_length
+       # Define a helper function
+       def filter_data(data):
+           group_lengths = data.groupby('permno').size()
+           valid_permnos = group_lengths[group_lengths >= min_len].index
+           return data[data['permno'].isin(valid_permnos)].copy()
+
+       self.train_data = filter_data(self.train_data)
+       self.val_data = filter_data(self.val_data)
+       self.test_data = filter_data(self.test_data)
+
+       self.logger.info(f"After filtering, train data stocks: {self.train_data['permno'].nunique()}")
+       self.logger.info(f"After filtering, validation data stocks: {self.val_data['permno'].nunique()}")
+       self.logger.info(f"After filtering, test data stocks: {self.test_data['permno'].nunique()}")
 
     def create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
         dataset = SequenceDataset(data, seq_length, self.feature_cols, self.ret_var)
         return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
 
-    def filter_stocks_by_min_length_in_splits(self):
-        """
-        Filter out stocks that have fewer data points than MIN_SEQUENCE_LENGTH in each of the train, val, test datasets.
-        """
-        min_len = Config.MIN_SEQUENCE_LENGTH
-
-        def filter_data(data):
-            group_lengths = data.groupby('permno').size()
-            valid_permnos = group_lengths[group_lengths >= min_len].index
-            return data[data['permno'].isin(valid_permnos)].copy()
-
-        self.train_data = filter_data(self.train_data)
-        self.val_data = filter_data(self.val_data)
-        self.test_data = filter_data(self.test_data)
-
-        self.logger.info(f"After filtering, train data stocks: {self.train_data['permno'].nunique()}")
-        self.logger.info(f"After filtering, validation data stocks: {self.val_data['permno'].nunique()}")
-        self.logger.info(f"After filtering, test data stocks: {self.test_data['permno'].nunique()}")
-
+        
     def get_min_group_length_across_splits(self):
         """
         Get the minimum group length across all splits after filtering.

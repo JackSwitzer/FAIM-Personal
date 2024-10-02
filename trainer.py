@@ -55,6 +55,9 @@ class LSTMTrainer:
 
     def train_model(self, train_loader, val_loader, test_loader, hyperparams, trial=None):
         try:
+            # Initialize epoch to a default value
+            epoch = 0
+
             # Initialize model
             input_size = len(self.feature_cols)
             model = LSTMModel(input_size=input_size, **hyperparams).to(self.device)
@@ -466,10 +469,12 @@ class LSTMTrainer:
         """
         Adjust the sequence length based on the minimum group length.
         """
-        # Ensure that seq_length is at least MIN_SEQUENCE_LENGTH and not greater than min_group_length
-        self.seq_length = min(Config.LSTM_PARAMS['seq_length'], min_group_length)
-        self.seq_length = max(self.seq_length, Config.MIN_SEQUENCE_LENGTH)
-        if self.seq_length < Config.MIN_SEQUENCE_LENGTH:
-            self.logger.warning(f"Adjusted sequence length {self.seq_length} is less than MIN_SEQUENCE_LENGTH {Config.MIN_SEQUENCE_LENGTH}.")
+        self.seq_length = min(self.config.LSTM_PARAMS['seq_length'], min_group_length)
+        self.seq_length = max(self.seq_length, self.config.MIN_SEQUENCE_LENGTH)
+        if self.seq_length < self.config.MIN_SEQUENCE_LENGTH:
+            self.logger.warning(
+                f"Adjusted sequence length {self.seq_length} is less than MIN_SEQUENCE_LENGTH "
+                f"{self.config.MIN_SEQUENCE_LENGTH}."
+            )
         else:
             self.logger.info(f"Sequence length set to: {self.seq_length}")

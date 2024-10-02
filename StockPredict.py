@@ -102,8 +102,16 @@ def main_worker(rank, world_size, config, use_distributed):
     data_processor.load_data()
     data_processor.preprocess_and_split_data()
 
-    # Adjust sequence length based on the minimum group length
+    # Compute sequence length based on minimum group length
     min_group_length = data_processor.min_group_length
+    seq_length = min(config.LSTM_PARAMS['seq_length'], min_group_length)
+    seq_length = max(seq_length, config.MIN_SEQUENCE_LENGTH)
+    data_processor.seq_length = seq_length  # Set seq_length in DataProcessor
+
+    # Now, filter the data in splits based on seq_length
+    data_processor.filter_stocks_by_min_length_in_splits()
+
+    # Proceed with initializing the trainer
     trainer = LSTMTrainer(
         feature_cols=data_processor.feature_cols,
         target_col=data_processor.ret_var,
