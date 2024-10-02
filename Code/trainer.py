@@ -14,13 +14,14 @@ from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 import pandas as pd
 import optuna
 from tqdm import tqdm
 
 from models import LSTMModel
-from data_processor import SequenceDataset
+from data_processor import SequenceDataset, DataProcessor
 from utils import *
 from config import Config
 
@@ -28,163 +29,140 @@ class LSTMTrainer:
     """
     Class to handle LSTM model training with hyperparameter optimization using Optuna.
     """
-    def __init__(self, feature_cols, target_col, device=Config.DEVICE, config=Config):
-        self.logger = logging.getLogger(__name__)  # Use module-level logger
+    def __init__(self, feature_cols, target_col, device, config, rank=0, world_size=1, use_distributed=False):
+        self.logger = get_logger('stock_predictor')
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.logger.info(f"Target column set to: {self.target_col}")
+        self.rank = rank
+        self.world_size = world_size
         self.device = device
         self.config = config
+        self.use_distributed = use_distributed
         self.out_dir = config.OUT_DIR
         self.model_weights_dir = config.MODEL_WEIGHTS_DIR or os.path.join(self.out_dir, "model_weights")
-        self.best_hyperparams = None  # To store the best hyperparameters
-        os.makedirs(self.out_dir, exist_ok=True)  # Ensure output directory exists
-        os.makedirs(self.model_weights_dir, exist_ok=True)  # Ensure model weights directory exists
-        self.world_size = dist.get_world_size()
-        self.rank = dist.get_rank()
+        self.best_hyperparams = None
+        os.makedirs(self.out_dir, exist_ok=True)
+        os.makedirs(self.model_weights_dir, exist_ok=True)
+        self.data_processor = DataProcessor(data_in_path=None, ret_var=target_col, standardize=config.STANDARDIZE)
+        self.data_processor.feature_cols = feature_cols
 
     def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
-        """
-        Create a DataLoader for the given data.
-        """
-        dataset = SequenceDataset(
-            data, 
-            seq_length,
-            self.feature_cols, 
-            self.target_col
-        )
-        sampler = torch.utils.data.distributed.DistributedSampler(dataset)
-        dataloader = DataLoader(
-            dataset, 
-            batch_size=batch_size, 
-            shuffle=False, 
-            num_workers=num_workers,
-            pin_memory=True,
-            sampler=sampler
-        )
-        return dataloader
+        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
+        if self.use_distributed:
+            sampler = DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank)
+            return DataLoader(
+                dataset,
+                batch_size=batch_size,
+                sampler=sampler,
+                num_workers=num_workers,
+                pin_memory=True,
+                prefetch_factor=2,
+                persistent_workers=True
+            )
+        else:
+            return DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True,
+                prefetch_factor=2,
+                persistent_workers=True
+            )
 
-    def train_model(self, train_data, val_data, test_data, hyperparams, trial=None):
-        """
-        Train the LSTM model with specified hyperparameters.
+    def train_model(self, train_loader, val_loader, test_loader, hyperparams, trial=None):
+        try:
+            # Initialize epoch to a default value
+            epoch = 0
 
-        Args:
-            train_data (DataFrame): Training data.
-            val_data (DataFrame): Validation data.
-            test_data (DataFrame): Test data.
-            hyperparams (dict): Dictionary containing hyperparameters.
-            trial (optuna.trial.Trial or None): Optuna trial object.
+            # Initialize model
+            input_size = len(self.feature_cols)
+            model = LSTMModel(input_size=input_size, **hyperparams).to(self.device)
+            if self.use_distributed:
+                model = DDP(model, device_ids=[self.rank])
 
-        Returns:
-            model (nn.Module): Trained model.
-            training_history (dict): Dictionary containing training history.
-        """
-        self.logger.info(f"Starting training with hyperparameters: {hyperparams}")
-        self.logger.info(f"Training on device: {self.device}")
-
-        # Extract hyperparameters, using Config defaults if not provided
-        seq_length = hyperparams.get('seq_length', 10)  # Add a default sequence length to Config
-        batch_size = hyperparams.get('batch_size', Config.BATCH_SIZE)
-        learning_rate = hyperparams.get('learning_rate', Config.LEARNING_RATE)
-        num_epochs = hyperparams.get('num_epochs', Config.NUM_EPOCHS)
-        accumulation_steps = hyperparams.get('accumulation_steps', Config.ACCUMULATION_STEPS)
-        clip_grad_norm = hyperparams.get('clip_grad_norm', Config.CLIP_GRAD_NORM)
-
-        # Get LSTM params, update with any provided in hyperparams
-        lstm_params = Config.get_lstm_params()
-        lstm_params.update({k: v for k, v in hyperparams.items() if k in lstm_params})
-
-        # Initialize model
-        input_size = len(self.feature_cols)  # Updated feature dimension
-        model = LSTMModel(input_size=input_size, **lstm_params).to(self.device)
-
-        # Wrap model in DDP
-        model = DDP(model, device_ids=[self.rank])
-
-        # Set up optimizer
-        optimizer_name = hyperparams.get('optimizer_name', 'Adam')
-        weight_decay = hyperparams.get('weight_decay', 0)
-        optimizer_class = getattr(optim, optimizer_name)
-        optimizer = optimizer_class(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
-
-        # Set up scheduler
-        use_scheduler = hyperparams.get('use_scheduler', False)
-        scheduler = None
-        if use_scheduler:
+            # Initialize optimizer, criterion, and scheduler
+            learning_rate = hyperparams.get('learning_rate', 0.001)
+            weight_decay = hyperparams.get('weight_decay', 0.0)  # Provide a default value if not present
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+            criterion = nn.MSELoss()
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                mode='min',
                 factor=hyperparams.get('scheduler_factor', 0.1),
                 patience=hyperparams.get('scheduler_patience', 5)
             )
 
-        criterion = nn.MSELoss()
-        best_val_loss = float('inf')
+            # Initialize GradScaler for mixed-precision training
+            scaler = GradScaler()
 
-        # Initialize variables
-        train_losses = []
-        val_losses = []
-        test_losses = []
-        best_model_state = None
+            # Load checkpoint if available
+            start_epoch, best_val_loss = self.load_checkpoint(model, optimizer, scheduler)
 
-        # Load checkpoint if available and not in hyperparameter optimization
-        if trial is None:
-            model, optimizer, scheduler, start_epoch, best_val_loss, loaded_hyperparams = self.load_checkpoint(
-                model, optimizer, scheduler
-            )
+            # Training loop
+            num_epochs = hyperparams.get('num_epochs', self.config.NUM_EPOCHS)
+            train_losses, val_losses, test_losses = [], [], []
+            best_val_loss = float('inf') if best_val_loss is None else best_val_loss
+            last_log_time = time.time()
+            total_train_time = 0
 
-            # Check if loaded hyperparameters match current hyperparameters
-            if loaded_hyperparams and loaded_hyperparams != hyperparams:
-                self.logger.warning("Loaded hyperparameters do not match current hyperparameters. "
-                                    "Using loaded hyperparameters for consistency.")
-                hyperparams = loaded_hyperparams
-        else:
-            # Start from scratch during hyperparameter optimization
-            start_epoch = 1
+            num_batches = len(train_loader)
 
-        # Gradient accumulation setup
-        if accumulation_steps < 1:
-            accumulation_steps = 1
-        self.logger.debug(f"Using gradient accumulation with {accumulation_steps} steps")
-
-        # Adjust number of workers to a reasonable number
-        num_workers = hyperparams.get('num_workers', Config.NUM_WORKERS)
-        num_workers = min(num_workers, 4)
-
-        # Create data loaders outside the training loop
-        train_loader = self._create_dataloader(train_data, seq_length, batch_size, num_workers=num_workers)
-        val_loader = self._create_dataloader(val_data, seq_length, batch_size, num_workers=num_workers) if val_data is not None else None
-        test_loader = self._create_dataloader(test_data, seq_length, batch_size, num_workers=num_workers) if test_data is not None else None
-
-        last_log_time = time.time()
-        total_train_time = 0
-
-        try:
-            for epoch in range(start_epoch, num_epochs + 1):
+            for epoch in range(start_epoch, num_epochs):
                 epoch_start_time = time.time()
 
+                # Training step
                 train_loss = self._train_epoch(
-                    model, train_loader, criterion, optimizer,
-                    clip_grad_norm, accumulation_steps
+                    model,
+                    train_loader,
+                    criterion,
+                    optimizer,
+                    scaler,
+                    scheduler,  # Pass the scheduler to _train_epoch
+                    clip_grad_norm=self.config.CLIP_GRAD_NORM,
+                    accumulation_steps=self.config.ACCUMULATION_STEPS,
+                    epoch=epoch
                 )
                 train_losses.append(train_loss)
 
-                epoch_duration = time.time() - epoch_start_time
-                total_train_time += epoch_duration
+                # Validation step
+                val_loss = self._evaluate(model, val_loader, criterion)
+                val_losses.append(val_loss)
 
-                # Log only at specified intervals or on the last epoch
-                if epoch % Config.LOG_INTERVAL == 0 or epoch == num_epochs:
+                # Test step (optional)
+                if test_loader is not None:
+                    test_loss = self._evaluate(model, test_loader, criterion)
+                    test_losses.append(test_loss)
+
+                # Save checkpoint
+                state = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                    'hyperparams': hyperparams
+                }
+                self.save_checkpoint(state, is_best=False, filename=f'checkpoint_epoch_{epoch + 1}.pth.tar')
+
+                # Update best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    self.save_checkpoint(state, is_best=True, filename='best_model.pth.tar')
+
+                # Log progress
+                if epoch % self.config.LOG_INTERVAL == 0 or epoch == num_epochs - 1:
                     current_time = time.time()
                     time_since_last_log = current_time - last_log_time
+                    total_train_time += time_since_last_log
 
-                    self.logger.info(f"Epoch {epoch}/{num_epochs} completed")
+                    self.logger.info(f"Epoch {epoch + 1}/{num_epochs} completed")
                     self.logger.info(f"Time since last log: {time_since_last_log:.2f} seconds")
                     self.logger.info(f"Average time per epoch: {total_train_time / (epoch - start_epoch + 1):.2f} seconds")
                     self.logger.info(f"Train Loss: {train_loss:.4f}")
+                    self.logger.info(f"Validation Loss: {val_loss:.4f}")
+                    if test_loader is not None:
+                        self.logger.info(f"Test Loss: {test_loss:.4f}")
 
                     # Log GPU and memory usage
                     log_memory_usage()
@@ -192,85 +170,112 @@ class LSTMTrainer:
 
                     last_log_time = current_time
 
-                # Validation loss calculation
-                if val_loader is not None:
-                    val_loss = self._evaluate(model, val_loader, criterion)
-                    val_losses.append(val_loss)
+                # Report to Optuna and check for pruning
+                if trial is not None:
+                    trial.report(val_loss, epoch)
+                    if trial.should_prune():
+                        raise optuna.exceptions.TrialPruned()
 
-                    # Log validation loss at specified intervals or on the last epoch
-                    if epoch % Config.LOG_INTERVAL == 0 or epoch == num_epochs:
-                        self.logger.info(f"Validation Loss: {val_loss:.4f}")
-
-                    # Update best model
-                    if val_loss < best_val_loss:
-                        best_val_loss = val_loss
-                        best_model_state = model.state_dict()
-                        best_optimizer_state = optimizer.state_dict()
-                        best_scheduler_state = scheduler.state_dict() if scheduler else None
-
-                    # Report to Optuna and check for pruning
-                    if trial is not None:
-                        trial.report(val_loss, epoch)
-                        if trial.should_prune():
-                            raise optuna.exceptions.TrialPruned()
-
-                # Test loss calculation every 10 epochs
-                if epoch % 10 == 0 and test_loader is not None:
-                    test_loss = self._evaluate(model, test_loader, criterion)
-                    test_losses.append(test_loss)
-                    self.logger.info(f"Epoch {epoch}/{num_epochs}, Test Loss: {test_loss:.4f}")
-
-                # Save checkpoint only if not in hyperparameter optimization
-                if trial is None:
-                    checkpoint_interval = hyperparams.get('checkpoint_interval', 10)
-                    if epoch % checkpoint_interval == 0:
-                        is_best = val_loss < best_val_loss if val_loader is not None else False
-                        state = {
-                            'epoch': epoch,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                            'best_val_loss': best_val_loss if val_data is not None else None,
-                            'hyperparams': hyperparams
-                        }
-                        self.save_checkpoint(state, is_best, filename=f'checkpoint_epoch_{epoch}.pth')
-
-                # Scheduler step
-                if scheduler:
-                    scheduler.step(val_loss if val_loader is not None else train_loss)
-
-            # Save training metrics
-            if trial is None:
-                self.save_training_metrics(train_losses, val_losses, test_losses)
-
-            # Load the best model state if available
-            if best_model_state:
-                model.load_state_dict(best_model_state)
-                self.logger.info("Loaded best model state.")
+            # Save final state
+            self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
 
             training_history = {
                 'train_losses': train_losses,
                 'val_losses': val_losses,
                 'test_losses': test_losses
             }
+
             return model, training_history
 
         except KeyboardInterrupt:
             self.logger.warning("Training interrupted by user.")
             self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
             raise
-
         except Exception as e:
             self.logger.error(f"An error occurred during training: {str(e)}")
             self.logger.error(traceback.format_exc())
             self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
-            raise
+            raise  # Re-raise exception to handle it outside if needed
 
         finally:
-            # Cleanup
             self.logger.info("Training run completed or interrupted.")
             if trial is None:
                 self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+
+    def _train_epoch(self, model, dataloader, criterion, optimizer, scaler, scheduler, clip_grad_norm=None, accumulation_steps=1, epoch=0):
+        model.train()
+        total_loss = 0.0
+
+        for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
+            batch_X = batch_X.to(self.device, non_blocking=True)
+            batch_Y = batch_Y.to(self.device, non_blocking=True)
+
+            with autocast(device_type=self.device.type, dtype=torch.float16):
+                outputs = model(batch_X).squeeze(-1)
+                loss = criterion(outputs, batch_Y) / accumulation_steps
+
+            scaler.scale(loss).backward()
+
+            if (batch_idx + 1) % accumulation_steps == 0:
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+
+            total_loss += loss.item() * accumulation_steps
+
+        # Update the scheduler
+        scheduler.step(total_loss / len(dataloader))
+
+        return total_loss / len(dataloader)
+
+    def _evaluate(self, model, dataloader, criterion, return_predictions=False):
+        model.eval()
+        total_loss = 0.0
+        total_samples = 0
+        predictions = []
+        targets = []
+        with torch.no_grad():
+            for batch_X, batch_Y in dataloader:
+                batch_X = batch_X.to(self.device, non_blocking=True)
+                batch_Y = batch_Y.to(self.device, non_blocking=True)
+                outputs = model(batch_X).squeeze(-1)
+                loss = criterion(outputs, batch_Y)
+                batch_size = batch_Y.size(0)
+                total_loss += loss.item() * batch_size
+                total_samples += batch_size
+                if return_predictions:
+                    predictions.extend(outputs.cpu().numpy())
+                    targets.extend(batch_Y.cpu().numpy())
+        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+        if return_predictions:
+            return avg_loss, predictions, targets
+        else:
+            return avg_loss
+
+    def save_checkpoint(self, state, is_best=False, filename='checkpoint.pth.tar'):
+        """
+        Save a checkpoint of the model.
+        """
+        if self.rank == 0:
+            # Synchronize processes
+            if self.use_distributed:
+                torch.distributed.barrier()
+            save_path = os.path.join(self.model_weights_dir, filename)
+            torch.save(state, save_path)
+            if is_best:
+                best_path = os.path.join(self.model_weights_dir, 'model_best.pth.tar')
+                shutil.copyfile(save_path, best_path)
+            self.logger.info(f"Checkpoint saved to {save_path}")
+
+    def save_training_metrics(self, train_losses, val_losses, test_losses):
+        metrics = {
+            'train_losses': train_losses,
+            'val_losses': val_losses,
+            'test_losses': test_losses
+        }
+        with open(os.path.join(self.out_dir, 'training_metrics.json'), 'w') as f:
+            json.dump(metrics, f)
+        self.logger.info("Training metrics saved.")
 
     def _save_interrupted_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
         """Save the current state when training is interrupted."""
@@ -331,7 +336,7 @@ class LSTMTrainer:
         except Exception as e:
             self.logger.error(f"Failed to save final state: {str(e)}")
 
-    def optimize_hyperparameters(self, train_data, val_data, test_data, n_trials=Config.N_TRIALS):
+    def optimize_hyperparameters(self, train_dataset, val_dataset, test_dataset, n_trials=Config.N_TRIALS):
         """
         Optimize hyperparameters using Optuna.
         """
@@ -340,7 +345,7 @@ class LSTMTrainer:
                 'seq_length': trial.suggest_int('seq_length', 2, 12),
                 'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),
                 'learning_rate': trial.suggest_float('learning_rate', 0.0005, 0.002, log=True),
-                'num_epochs': Config.HYPEROPT_EPOCHS,
+                'num_epochs': self.config.HYPEROPT_EPOCHS,
                 'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256]),
                 'num_layers': trial.suggest_int('num_layers', 1, 4),
                 'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.3),
@@ -349,31 +354,60 @@ class LSTMTrainer:
                 'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU', 'ELU']),
                 'fc1_size': trial.suggest_categorical('fc1_size', [16, 32, 64, 128]),
                 'fc2_size': trial.suggest_categorical('fc2_size', [16, 32, 64, 128]),
+                'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),  # Updated lower bound
+                'scheduler_factor': trial.suggest_float('scheduler_factor', 0.1, 0.9),
+                'scheduler_patience': trial.suggest_int('scheduler_patience', 2, 10)
             }
+
+            # Create data loaders with trial's hyperparameters
+            seq_length = hyperparams['seq_length']
+            batch_size = hyperparams['batch_size']
+
+            train_loader = self._create_dataloader(train_dataset, seq_length, batch_size)
+            val_loader = self._create_dataloader(val_dataset, seq_length, batch_size)
+            test_loader = self._create_dataloader(test_dataset, seq_length, batch_size)
 
             # Train the model with pruning
             try:
-                model, training_history = self.train_model(train_data, val_data, test_data, hyperparams, trial=trial)
-                
+                model, training_history = self.train_model(
+                    train_loader, val_loader, test_loader, hyperparams, trial=trial
+                )
                 # Use the last validation loss as the objective value
                 last_val_loss = training_history['val_losses'][-1]
                 return last_val_loss
             except optuna.exceptions.TrialPruned:
                 raise
+            except Exception as e:
+                self.logger.error(f"An error occurred during trial: {str(e)}")
+                self.logger.error(traceback.format_exc())
+                raise
 
-        # Setup Optuna study with pruning
+        # Existing code to run the study
         study = optuna.create_study(direction='minimize', pruner=optuna.pruners.MedianPruner())
         study.optimize(objective, n_trials=n_trials)
 
+        # After the trial, save the best hyperparameters
+        self.save_hyperparams(self.best_hyperparams, is_best=True)
+
         # Store and return best hyperparameters
         self.best_hyperparams = study.best_params
-        self.best_hyperparams['num_epochs'] = Config.HYPEROPT_EPOCHS
+        self.best_hyperparams['num_epochs'] = self.config.HYPEROPT_EPOCHS
         best_val_loss = study.best_value
 
         # Train and save the best model
-        best_model, _ = self.train_model(train_data, val_data, test_data, self.best_hyperparams)
+        # Create data loaders with the best hyperparameters
+        seq_length = self.best_hyperparams['seq_length']
+        batch_size = self.best_hyperparams['batch_size']
+
+        train_loader = self._create_dataloader(train_dataset, seq_length, batch_size)
+        val_loader = self._create_dataloader(val_dataset, seq_length, batch_size)
+        test_loader = self._create_dataloader(test_dataset, seq_length, batch_size)
+
+        best_model, _ = self.train_model(
+            train_loader, val_loader, test_loader, self.best_hyperparams
+        )
         state = {
-            'epoch': Config.NUM_EPOCHS,
+            'epoch': self.best_hyperparams['num_epochs'],
             'model_state_dict': best_model.state_dict(),
             'optimizer_state_dict': None,
             'scheduler_state_dict': None,
@@ -381,7 +415,7 @@ class LSTMTrainer:
             'hyperparams': self.best_hyperparams
         }
         self.save_checkpoint(state, is_best=True, filename='best_model.pth.tar')
-        
+
         # Save the best hyperparameters
         self.save_hyperparams(self.best_hyperparams, is_best=True)
 
@@ -401,120 +435,65 @@ class LSTMTrainer:
 
     def save_hyperparams(self, hyperparams, is_best=False):
         # Adjust method to save hyperparameters for the single target variable
-        filename = "best_hyperparams.json" if is_best else "hyperparams.json"
+        filename = 'best_hyperparams.json' if is_best else f"hyperparams_trial_{self.current_trial}.json"
         filepath = os.path.join(self.out_dir, filename)
         with open(filepath, 'w') as f:
-            json.dump(hyperparams, f)
-
-    def save_model(self, model, is_best=False):
-        # Adjust method to save model weights for stock_exret
-        filename = "best_model.pt" if is_best else "model.pt"
-        filepath = os.path.join(self.model_weights_dir, filename)
-        torch.save(model.state_dict(), filepath)
-
-    def save_checkpoint(self, state, is_best=False, filename='checkpoint.pth.tar'):
-        """
-        Save a checkpoint of the model.
-        """
-        save_path = os.path.join(self.model_weights_dir, filename)
-        torch.save(state, save_path)
-        if is_best:
-            best_path = os.path.join(self.model_weights_dir, 'model_best.pth.tar')
-            shutil.copyfile(save_path, best_path)
-        self.logger.info(f"Checkpoint saved to {save_path}")
+            json.dump(hyperparams, f, indent=4)
+        self.logger.info(f"Hyperparameters saved to {filepath}")
 
     def load_checkpoint(self, model, optimizer, scheduler=None):
         """
         Load the latest checkpoint if it exists and handle exceptions due to mismatched shapes.
         """
-        checkpoint_files = [f for f in os.listdir(self.model_weights_dir) if f.endswith('.pth')]
+        checkpoint_files = [
+            f for f in os.listdir(self.model_weights_dir) if f.endswith('.pth.tar')
+        ]
         if not checkpoint_files:
             self.logger.info("No checkpoints found. Starting training from scratch.")
-            return model, optimizer, scheduler, 1, float('inf'), {}
+            return 0, float('inf')
 
-        latest_checkpoint = max(checkpoint_files, key=lambda f: os.path.getmtime(os.path.join(self.model_weights_dir, f)))
+        latest_checkpoint = max(
+            checkpoint_files,
+            key=lambda f: os.path.getctime(os.path.join(self.model_weights_dir, f))
+        )
         checkpoint_path = os.path.join(self.model_weights_dir, latest_checkpoint)
+        self.logger.info(f"Loading checkpoint from {checkpoint_path}")
 
         try:
-            self.logger.info("Attempting to load checkpoint")
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+            # Load states into model, optimizer, and scheduler
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if scheduler and 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint.get('epoch', 0) + 1
+            epoch = checkpoint['epoch']
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            hyperparams = checkpoint.get('hyperparams', {})
-            self.logger.info(f"Successfully loaded checkpoint from epoch {start_epoch - 1}")
+            self.logger.info(f"Checkpoint loaded successfully from {checkpoint_path}")
+            return epoch, best_val_loss
         except Exception as e:
             self.logger.error(f"Failed to load checkpoint: {str(e)}")
-            self.logger.info("Starting training from scratch.")
-            return model, optimizer, scheduler, 1, float('inf'), {}
+            return 0, float('inf')
 
-        return model, optimizer, scheduler, start_epoch, best_val_loss, hyperparams
+    def evaluate_test_set(self, model, test_data, hyperparams):
+        """
+        Evaluate the model on the test set and return predictions and targets.
+        """
+        test_loader = self._create_dataloader(test_data, hyperparams['seq_length'], hyperparams['batch_size'])
+        _, predictions, targets = self._evaluate(model, test_loader, nn.MSELoss(), return_predictions=True)
+        return predictions, targets
 
-    def save_training_metrics(self, train_losses, val_losses, test_losses):
-        metrics = {
-            'train_losses': train_losses,
-            'val_losses': val_losses,
-            'test_losses': test_losses
-        }
-        with open(os.path.join(self.out_dir, 'training_metrics.json'), 'w') as f:
-            json.dump(metrics, f)
-        self.logger.info("Training metrics saved.")
+    def adjust_sequence_length(self, min_group_length):
+        """
+        Adjust the sequence length based on the minimum group length.
+        """
+        self.seq_length = min(self.config.LSTM_PARAMS['seq_length'], min_group_length)
+        self.seq_length = max(self.seq_length, self.config.MIN_SEQUENCE_LENGTH)
+        self.logger.info(f"Sequence length set to: {self.seq_length}")
 
-    def _train_epoch(self, model, dataloader, criterion, optimizer, clip_grad_norm=None, accumulation_steps=1):
-        """Train the model for one epoch with gradient accumulation."""
-        model.train()
-        total_loss = 0.0
-        scaler = GradScaler()
-        optimizer.zero_grad(set_to_none=True)
+        # Update DataProcessor's seq_length if needed
+        self.config.SEQ_LENGTH = self.seq_length  # Ensure consistency
 
-        for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
-            batch_X = batch_X.to(self.device, non_blocking=True)
-            batch_Y = batch_Y.to(self.device, non_blocking=True)
-
-            with autocast(device_type=self.device.type, dtype=torch.float16):
-                outputs = model(batch_X).squeeze(-1)
-                loss = criterion(outputs, batch_Y) / accumulation_steps
-
-            scaler.scale(loss).backward()
-
-            if (batch_idx + 1) % accumulation_steps == 0:
-                if clip_grad_norm:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-
-            total_loss += loss.detach() * accumulation_steps * batch_Y.size(0)  # Avoid .item() inside loop
-
-        #  avg_loss = total_loss.item() / len(dataloader.dataset)
-        avg_loss = total_loss / len(dataloader.dataset)
-        return avg_loss
-
-    def _evaluate(self, model, dataloader, criterion, return_predictions=False):
-        model.eval()
-        total_loss = 0.0
-        total_samples = 0
-        predictions = []
-        targets = []
-        with torch.no_grad():
-            for batch_X, batch_Y in dataloader:
-                batch_X = batch_X.to(self.device, non_blocking=True)
-                batch_Y = batch_Y.to(self.device, non_blocking=True)
-                outputs = model(batch_X).squeeze(-1)
-                loss = criterion(outputs, batch_Y)
-                batch_size = batch_Y.size(0)
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
-                if return_predictions:
-                    predictions.extend(outputs.cpu().numpy())
-                    targets.extend(batch_Y.cpu().numpy())
-        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
-        if return_predictions:
-            return avg_loss, predictions, targets
-        else:
-            return avg_loss
+        # If DataProcessor instance is accessible
+        if hasattr(self, 'data_processor'):
+            self.data_processor.seq_length = self.seq_length

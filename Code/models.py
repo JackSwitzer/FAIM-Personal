@@ -189,23 +189,7 @@ class LSTMModel(nn.Module):
     def __init__(self, input_size, **kwargs):
         super(LSTMModel, self).__init__()
         
-        # Use Config defaults if not provided in kwargs
-        params = Config.get_lstm_params()
-        params.update(kwargs)
-        
-        self.hidden_size = params['hidden_size']
-        self.num_layers = params['num_layers']
-        self.dropout_rate = params['dropout_rate']
-        self.bidirectional = params['bidirectional']
-        self.use_batch_norm = params['use_batch_norm']
-        self.activation_function = params['activation_function']
-        self.fc1_size = params['fc1_size']
-        self.fc2_size = params['fc2_size']
-
-        self.use_batch_norm = self.use_batch_norm
-        self.bidirectional = self.bidirectional
-
-        # LSTM Layer
+        # Use the actual input_size (147 for your real dataset)
         self.lstm = nn.LSTM(
             input_size, self.hidden_size, self.num_layers,
             batch_first=True, dropout=self.dropout_rate,

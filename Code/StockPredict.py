@@ -1,9 +1,11 @@
 import os
+import logging
 import traceback
 import pandas as pd
-import torch.nn as nn
+import torch
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from config import Config
-
 from data_processor import DataProcessor
 from trainer import LSTMTrainer
 from utils import *
@@ -14,15 +16,12 @@ def main_Regression(rank, world_size):
     out_dir = Config.OUT_DIR
     setup_logging(out_dir)
     logger = logging.getLogger(__name__)  # Use module-level logger
-
     set_seed()
     try:
         data_input_dir = Config.DATA_INPUT_DIR
         full_data_path = Config.FULL_DATA_PATH
-
         target_variable = Config.TARGET_VARIABLE  # Change this if needed
         logger.info(f"Target variable set to: {target_variable}")
-
         # Data processing
         data_processor = DataProcessor(full_data_path, target_variable, standardize=True)
         data_processor.load_data()
@@ -86,122 +85,84 @@ def main_Regression(rank, world_size):
         cleanup()
         logger.info("Regression run completed.")
 
-def main(rank, world_size):
-    setup(rank, world_size)
-    try:
-        setup_logging(Config.OUT_DIR)
-        logger = logging.getLogger(__name__)  # Use module-level logger
-        os.makedirs(Config.MODEL_WEIGHTS_DIR, exist_ok=True)
-        set_seed(Config.SEED)
-        clear_gpu_memory()
-        check_torch_version()
-        device = check_device()
+def main_worker(rank, world_size, config, use_distributed):
+    setup(rank, world_size, use_distributed=use_distributed)
+    set_seed(config.SEED + rank)  # Ensure different seeds for each process
+    setup_logging(config.OUT_DIR, f"train_log_rank_{rank}.log")
 
-        target_variable = Config.TARGET_VARIABLE  # Set the target variable
-        logger.info(f"Starting training for target variable: {target_variable}")
-
-        # Data processing
-        data_processor = DataProcessor(
-            Config.FULL_DATA_PATH,
-            ret_var=target_variable,
-            standardize=Config.STANDARDIZE
-        )
-        data_processor.load_data()
-        data_processor.preprocess_data()
-        data_processor.split_data()
-
-        # Initialize LSTMTrainer
-        lstm_trainer = LSTMTrainer(
-            feature_cols=data_processor.feature_cols,
-            target_col=target_variable,
-            device=device
-        )
-
-        # Determine minimum group length
-        min_group_length = data_processor.get_min_group_length()
-        logger.info(f"Minimum group length across all sets: {min_group_length}")
-        if min_group_length < Config.MIN_SEQUENCE_LENGTH:
-            logger.warning(
-                f"The minimum group length {min_group_length} is less than the required sequence length."
-                f" Adjusting sequence length to {min_group_length}."
-            )
-            Config.LSTM_PARAMS['seq_length'] = min_group_length
-
-        # Load best hyperparameters or optimize if not available
-        best_hyperparams = lstm_trainer.load_hyperparams(is_best=True)
-        if best_hyperparams is None:
-            logger.info(f"Starting hyperparameter optimization for {target_variable}...")
-            best_hyperparams, _ = lstm_trainer.optimize_hyperparameters(
-                data_processor.train_data,
-                data_processor.val_data,
-                data_processor.test_data,
-                n_trials=Config.N_TRIALS
-            )
-            if best_hyperparams is None:
-                logger.error(f"Hyperparameter optimization failed for {target_variable}.")
-                return
-
-        # Adjust sequence length if necessary
-        if best_hyperparams['seq_length'] > min_group_length:
-            best_hyperparams['seq_length'] = max(min_group_length, Config.MIN_SEQUENCE_LENGTH)
-            logger.info(
-                f"Adjusted sequence length to: {best_hyperparams['seq_length']} "
-                f"due to minimum group length."
-            )
-
-        # Start final training
-        logger.info(
-            f"Starting final LSTM model training for {target_variable} "
-            f"with hyperparameters: {best_hyperparams}"
-        )
-
-        model, training_history = lstm_trainer.train_model(
-            data_processor.train_data,
-            data_processor.val_data,
-            data_processor.test_data,
-            best_hyperparams.copy()
-        )
-        logger.info(f"Final LSTM model training completed for {target_variable}.")
-
-        # Evaluate on test set
-        predictions, targets = lstm_trainer.evaluate_test_set(model, data_processor.test_data, best_hyperparams)
-        logger.info(
-            f"LSTM model evaluation completed for {target_variable}. "
-            f"Number of predictions: {len(predictions)}"
-        )
-
-        # Prepare DataFrame with Predictions
-        test_data = data_processor.test_data.copy()
-        test_data.reset_index(drop=True, inplace=True)
-        test_data['lstm_prediction'] = predictions
-
-        # Calculate OOS R-squared
-        yreal = test_data[target_variable]
-        ypred = test_data['lstm_prediction']
-        r2_lstm = calculate_oos_r2(yreal.values, ypred)
-        logger.info(f"{target_variable} LSTM OOS R2: {r2_lstm:.4f}")
-
-        # Save LSTM predictions
-        output_filename = 'lstm_predictions.csv'
-        save_csv(test_data, Config.OUT_DIR, output_filename)
-
-    except KeyboardInterrupt:
-        logger.info("Process interrupted by user. Cleaning up...")
-    except Exception as e:
-        logger.error(f"An error occurred: {str(e)}")
-        logger.error(traceback.format_exc())
-    finally:
-        logger.info("Process finished.")
-        clear_gpu_memory()
-
-if __name__ == "__main__":
-    world_size = Config.NUM_NODES * Config.GPUS_PER_NODE
-    torch.multiprocessing.spawn(main, args=(world_size,), nprocs=world_size, join=True)
+    # Set device for this process
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{rank}")
+        torch.cuda.set_device(device)
+    else:
+        device = torch.device("cpu")
     
-    try:
-        main()
-        # main_Regression()
-    except KeyboardInterrupt:
-        print("\nProcess interrupted by user. Cleaning up...")
-    finally:
-        print("Process finished.")
+    logger = get_logger('stock_predictor')
+    logger.info(f"Using device: {device}")
+
+    # Initialize DataProcessor with the option to use permco
+    data_processor = DataProcessor(
+        config.FULL_DATA_PATH,
+        ret_var=config.TARGET_VARIABLE,
+        use_permco=config.USE_PERMCO  # Add this option to your Config class
+    )
+    data_processor.load_data()
+    data_processor.preprocess_data()
+    data_processor.split_data()
+    data_processor.filter_stocks_by_min_length_in_splits()
+
+    # Ensure seq_length is adjusted based on min_group_length
+    min_group_length = data_processor.get_min_group_length()
+    seq_length = min(config.LSTM_PARAMS.get('seq_length', 10), min_group_length)
+
+    # Initialize trainer with updated feature columns and input size
+    trainer = LSTMTrainer(
+        feature_cols=data_processor.feature_cols,
+        target_col=data_processor.ret_var,
+        device=device,
+        config=config,
+        rank=rank,
+        world_size=world_size,
+        use_distributed=use_distributed
+    )
+    trainer.adjust_sequence_length(min_group_length)
+
+    # Now pass datasets to optimize_hyperparameters
+    train_dataset = data_processor.train_data
+    val_dataset = data_processor.val_data
+    test_dataset = data_processor.test_data
+
+    # Load or optimize hyperparameters
+    hyperparams = trainer.load_hyperparams(is_best=True)
+    if hyperparams is None:
+        hyperparams, _ = trainer.optimize_hyperparameters(
+            train_dataset, val_dataset, test_dataset, n_trials=config.N_TRIALS
+        )
+
+    # Create data loaders with optimized hyperparameters
+    seq_length = hyperparams['seq_length']
+    batch_size = hyperparams['batch_size']
+    train_loader = trainer._create_dataloader(train_dataset, seq_length, batch_size)
+    val_loader = trainer._create_dataloader(val_dataset, seq_length, batch_size)
+    test_loader = trainer._create_dataloader(test_dataset, seq_length, batch_size)
+
+    # Train the model
+    model, training_history = trainer.train_model(train_loader, val_loader, test_loader, hyperparams)
+
+    # Clean up
+    cleanup(use_distributed)
+
+def main():
+    world_size = torch.cuda.device_count()
+    use_distributed = Config.USE_DISTRIBUTED and world_size > 1
+    if use_distributed:
+        mp.spawn(main_worker,
+                 args=(world_size, Config, use_distributed),
+                 nprocs=world_size,
+                 join=True)
+    else:
+        main_worker(0, 1, Config, use_distributed)
+
+if __name__ == '__main__':
+    main()
+     # main_Regression()
