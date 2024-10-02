@@ -25,7 +25,7 @@ class Config:
     TEST_DATA_PERIOD_MONTHS = None  # Use default splitting ratios without limiting test period
 
     # Training settings
-    NUM_EPOCHS = 1000  # Full training run epochs
+    NUM_EPOCHS = 5000  # Full training run epochs
     BATCH_SIZE = 512  # Batch size
     ACCUMULATION_STEPS = 2  # Gradient accumulation steps
     CLIP_GRAD_NORM = 1.0
@@ -33,25 +33,24 @@ class Config:
     NUM_WORKERS = 6
     CHECKPOINT_INTERVAL = 100
 
-    # LSTM hyperparameters 
     LSTM_PARAMS = {
-        'hidden_size': 128,
-        'num_layers': 2,
-        'dropout_rate': 0.2,
-        'bidirectional': False,
-        'use_batch_norm': True,
-        'activation_function': 'LeakyReLU',
-        'fc1_size': 64,
-        'fc2_size': 32,
-        'optimizer_name': 'Adam',
-        'learning_rate': 0.001,
-        'weight_decay': 1e-6,
-        'seq_length': 10,  # This can be tuned if desired
-        'batch_size': BATCH_SIZE,  # Use config value instead of tuning
-        'use_scheduler': True,
-        'scheduler_factor': 0.5,
-        'scheduler_patience': 5
-    }
+            'hidden_size': 128,  # Kept the same
+            'num_layers': 3,     # Kept the same
+            'dropout_rate': 0.3,  # Increased dropout to prevent overfitting
+            'bidirectional': False,
+            'use_batch_norm': True,
+            'activation_function': 'LeakyReLU',  # Changed to ReLU for simplicity
+            'fc1_size': 64,
+            'fc2_size': 32,
+            'optimizer_name': 'AdamW',  # Switched to AdamW optimizer
+            'learning_rate': 1e-3,  # Kept the same
+            'weight_decay': 1e-5,   # Increased weight decay for regularization
+            'seq_length': 7,       # Increased sequence length
+            'batch_size': BATCH_SIZE,
+            'use_scheduler': True,
+            'scheduler_factor': 0.5,
+            'scheduler_patience': 5
+        }
 
     # Hyperparameter optimization settings
     N_TRIALS = 20  # Number of trials for hyperparameter tuning

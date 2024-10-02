@@ -160,7 +160,8 @@ class LSTMTrainer:
                     # Save the best model's state dict (but not the optimizer/scheduler state)
                     self.save_best_model(model.state_dict())
                     # Save hyperparameters when a new best model is found, if necessary
-                    self.save_hyperparams(hyperparams, is_best=True)
+                    if trial is not None:
+                        self.save_hyperparams(hyperparams, is_best=True)
 
                 # Log progress and save checkpoints at LOG_INTERVAL epochs
                 if (epoch + 1) % self.config.LOG_INTERVAL == 0 or epoch == num_epochs - 1:
@@ -357,7 +358,7 @@ class LSTMTrainer:
         self.logger.info(f"Best hyperparameters: {best_hyperparams}")
 
         # Save the best hyperparameters
-        self.save_hyperparams('best_hyperparams', best_hyperparams, is_best=True)
+        self.save_hyperparams(best_hyperparams, is_best=True)
 
         return best_hyperparams, study.best_trial
 
