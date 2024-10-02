@@ -1,6 +1,7 @@
 import os
 import random
 import numpy as np
+import pandas as pd
 import torch
 import logging
 import gc
@@ -13,6 +14,7 @@ from packaging import version
 from datetime import datetime
 from config import Config
 from logging.handlers import RotatingFileHandler
+from torch.utils.data._utils.collate import default_collate
 
 # Create a global logger
 logger = logging.getLogger('stock_predictor')
@@ -117,21 +119,16 @@ def check_device():
 
 def log_gpu_memory_usage():
     try:
+        import pynvml
         pynvml.nvmlInit()
         device_count = pynvml.nvmlDeviceGetCount()
         for i in range(device_count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            used_memory = info.used
-            total_memory = info.total
-            logger.info(f"GPU {i} memory usage: {used_memory / (1024 ** 2):.1f} MB / {total_memory / (1024 ** 2):.1f} MB")
-    except pynvml.NVMLError as e:
-        logger.warning(f"Unable to log GPU memory usage: {e}")
-    finally:
-        try:
-            pynvml.nvmlShutdown()
-        except pynvml.NVMLError as e:
-            logger.warning(f"Error shutting down NVML: {e}")
+            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            print(f"GPU {i}: {mem_info.used / 1024 ** 2:.2f} MB / {mem_info.total / 1024 ** 2:.2f} MB")
+        pynvml.nvmlShutdown()
+    except Exception as e:
+        print(f"Unable to log GPU memory usage: {e}")
 
 def check_torch_version():
     required_version = "1.7.0"  # Adjust this to the minimum required version
@@ -151,7 +148,7 @@ def log_gpu_memory():
         logger.info(f"GPU memory allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         logger.info(f"GPU memory cached: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
 
-def set_seed(seed=Config.SEED):
+def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -159,3 +156,11 @@ def set_seed(seed=Config.SEED):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def custom_collate(batch):
+    sequences, targets, permnos, dates = zip(*batch)
+    sequences = torch.stack(sequences)
+    targets = torch.stack(targets)
+    permnos = torch.tensor(permnos)
+    dates = pd.to_datetime(dates)  # Convert dates to pandas Timestamps
+    return sequences, targets, permnos, dates

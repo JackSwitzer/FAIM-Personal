@@ -19,6 +19,7 @@ from torch.utils.data.distributed import DistributedSampler
 import pandas as pd
 import optuna
 from tqdm import tqdm
+from sklearn.metrics import r2_score
 
 from models import LSTMModel
 from data_processor import SequenceDataset, DataProcessor
@@ -53,33 +54,10 @@ class LSTMTrainer:
         self.data_processor.feature_cols = feature_cols
         self.seq_length = config.LSTM_PARAMS.get('seq_length', 10)
 
-    def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
-        if data is None or data.empty:
-            self.logger.error("Attempted to create DataLoader with empty or None dataset.")
-            raise ValueError("Cannot create DataLoader with empty or None dataset.")
-        
-        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
-        if len(dataset) == 0:
-            self.logger.error("SequenceDataset is empty. Check your data and sequence length.")
-            raise ValueError("SequenceDataset is empty. Cannot create DataLoader.")
-        
-        data_loader_args = {
-            'dataset': dataset,
-            'batch_size': batch_size,
-            'num_workers': num_workers,
-            'pin_memory': True,
-            'shuffle': False 
-        }
-        
-        if self.use_distributed:
-            sampler = DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank)
-            data_loader_args['sampler'] = sampler
-        else:
-            if num_workers > 0:
-                data_loader_args['prefetch_factor'] = 2
-                data_loader_args['persistent_workers'] = True
-
-        return DataLoader(**data_loader_args)
+    def _create_dataloader(self, data, seq_length, batch_size, num_workers=0):
+        return self.data_processor.create_dataloader(
+            data, seq_length, batch_size, num_workers=num_workers
+        )
 
     def train_model(self, train_loader, val_loader, test_loader, hyperparams, trial=None):
         try:
@@ -154,14 +132,15 @@ class LSTMTrainer:
                     self.logger.warning("Test dataloader is empty. Skipping testing.")
                     test_loss = None
 
-                # Update best model if validation loss has improved
+                # Save the best model
                 if val_loss is not None and val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    # Save the best model's state dict (but not the optimizer/scheduler state)
-                    self.save_best_model(model.state_dict())
-                    # Save hyperparameters when a new best model is found, if necessary
-                    if trial is not None:
+                    if not self.use_distributed or self.rank == 0:
+                        self.save_best_model(model.state_dict())
+                        # Save the hyperparameters
                         self.save_hyperparams(hyperparams, is_best=True)
+                        # Update the best hyperparameters in the trainer
+                        self.best_hyperparams = hyperparams
 
                 # Log progress and save checkpoints at LOG_INTERVAL epochs
                 if (epoch + 1) % self.config.LOG_INTERVAL == 0 or epoch == num_epochs - 1:
@@ -193,13 +172,14 @@ class LSTMTrainer:
                     last_log_time = current_time
 
                     # Save checkpoint
-                    self.save_checkpoint({
-                        'epoch': epoch + 1,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'best_val_loss': best_val_loss,
-                    })
+                    if not self.use_distributed or self.rank == 0:
+                        self.save_checkpoint({
+                            'epoch': epoch + 1,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict(),
+                            'best_val_loss': best_val_loss,
+                        })
 
                 # Report to Optuna and check for pruning
                 if trial is not None:
@@ -207,30 +187,34 @@ class LSTMTrainer:
                     if trial.should_prune():
                         raise optuna.exceptions.TrialPruned()
 
-            training_history = {
-                'train_losses': train_losses,
-                'val_losses': val_losses,
-                'test_losses': test_losses
-            }
+            # At the end of training, save the final model
+            if not self.use_distributed or self.rank == 0:
+                final_model_path = os.path.join(self.model_weights_dir, 'final_model.pth')
+                torch.save(model.state_dict(), final_model_path)
+                self.logger.info(f"Final model saved to {final_model_path}")
+                # Save final hyperparameters
+                self.save_hyperparams(hyperparams, is_best=False)
 
-            return model, training_history
+            return model, {'train_losses': train_losses, 'val_losses': val_losses, 'test_losses': test_losses}
 
         except Exception as e:
             self.logger.error(f"An error occurred during training: {str(e)}")
             self.logger.error(traceback.format_exc())
             # Save the current state before exiting
-            self.save_checkpoint({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-            }, filename='interrupted_checkpoint.pth.tar')
+            if not self.use_distributed or self.rank == 0:
+                self.save_checkpoint({
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_val_loss': best_val_loss,
+                }, filename='interrupted_checkpoint.pth.tar')
             self.logger.info(f"Interrupted state saved at epoch {epoch}. Training can be resumed later.")
 
         finally:
             # Save final state
-            self.save_final_state(model, epoch, best_val_loss)
+            if not self.use_distributed or self.rank == 0:
+                self.save_final_state(model, epoch, best_val_loss)
             self.logger.info("Model training completed.")
 
         return model, {'train_losses': train_losses, 'val_losses': val_losses, 'test_losses': test_losses}
@@ -266,26 +250,39 @@ class LSTMTrainer:
         return total_loss / len(dataloader)
 
     def _evaluate(self, model, dataloader, criterion, return_predictions=False):
+        if dataloader is None or len(dataloader) == 0:
+            self.logger.warning("DataLoader is empty or None. Skipping evaluation.")
+            if return_predictions:
+                return float('inf'), None, [], [], [], []
+            else:
+                return float('inf')
+
         model.eval()
         total_loss = 0.0
-        total_samples = 0
-        predictions = []
-        targets = []
+        all_predictions = []
+        all_targets = []
+        all_permnos = []
+        all_dates = []
+
         with torch.no_grad():
-            for batch_X, batch_Y in dataloader:
-                batch_X = batch_X.to(self.device, non_blocking=True)
-                batch_Y = batch_Y.to(self.device, non_blocking=True)
-                outputs = model(batch_X).squeeze(-1)
-                loss = criterion(outputs, batch_Y)
-                batch_size = batch_Y.size(0)
-                total_loss += loss.item() * batch_size
-                total_samples += batch_size
+            for batch_idx, (inputs, targets, permnos, dates) in enumerate(dataloader):
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                outputs = model(inputs).squeeze()
+                loss = criterion(outputs, targets)
+                total_loss += loss.item()
+
                 if return_predictions:
-                    predictions.extend(outputs.cpu().numpy())
-                    targets.extend(batch_Y.cpu().numpy())
-        avg_loss = total_loss / total_samples if total_samples > 0 else 0.0
+                    all_predictions.extend(outputs.cpu().numpy())
+                    all_targets.extend(targets.cpu().numpy())
+                    all_permnos.extend(permnos.cpu().numpy())
+                    all_dates.extend(dates)
+
+        avg_loss = total_loss / len(dataloader)
+
         if return_predictions:
-            return avg_loss, predictions, targets
+            # Calculate R2 score
+            r2 = r2_score(all_targets, all_predictions)
+            return avg_loss, r2, all_predictions, all_targets, all_permnos, all_dates
         else:
             return avg_loss
 
@@ -314,41 +311,46 @@ class LSTMTrainer:
             torch.save(model.state_dict(), final_model_path)
             self.logger.info(f"Final model state saved to {final_model_path}")
 
-            # Save the final checkpoint
-            self.save_checkpoint({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'best_val_loss': best_val_loss,
-            }, filename='final_checkpoint.pth')
-
             # Save the hyperparameters
-            self.save_hyperparams(self.best_hyperparams)
+            self.save_hyperparams(self.best_hyperparams, is_best=False)
             self.logger.info("Final hyperparameters saved.")
 
     def optimize_hyperparameters(self, train_dataset, val_dataset, test_dataset, n_trials=Config.N_TRIALS):
         """
         Optimize hyperparameters using Optuna.
         """
+        min_seq_length = self.get_minimum_sequence_length(train_dataset, val_dataset, test_dataset)
+        
         def objective(trial):
+            # Adjust the upper limit for seq_length
+            seq_length = trial.suggest_int('seq_length', 5, min_seq_length)
             hyperparams = {
                 'hidden_size': trial.suggest_int('hidden_size', 64, 512),  # Increased upper limit
                 'num_layers': trial.suggest_int('num_layers', 1, 4),
                 'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5),
                 'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True),
                 'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
-                'seq_length': trial.suggest_int('seq_length', 5, 30),  # Increased upper limit
+                'seq_length': seq_length,  # Increased upper limit
                 'batch_size': Config.BATCH_SIZE 
             }
 
             # Create data loaders with trial's hyperparameters
             train_loader = self._create_dataloader(train_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
-            val_loader = self._create_dataloader(val_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
-            test_loader = self._create_dataloader(test_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
+            val_loader = self._create_dataloader(val_dataset, hyperparams['seq_length'], hyperparams['batch_size']) if val_dataset is not None else None
+            test_loader = self._create_dataloader(test_dataset, hyperparams['seq_length'], hyperparams['batch_size']) if test_dataset is not None else None
 
+            # Check if train_loader is None or empty
+            if train_loader is None or len(train_loader) == 0:
+                self.logger.warning("Training DataLoader is None or empty. Skipping this trial.")
+                return float('inf')  # Return a high validation loss to skip this trial
+
+            # Proceed even if val_loader or test_loader is None
             # Train the model with the current hyperparameters
             model, _ = self.train_model(train_loader, val_loader, test_loader, hyperparams, trial)
+
+            # Evaluate validation loss
             val_loss = self.evaluate_validation_loss(model, val_loader, hyperparams)
-            return val_loss
+            return val_loss if val_loss is not None else float('inf')
 
         study = optuna.create_study(direction='minimize')
         study.optimize(objective, n_trials=n_trials)
@@ -427,13 +429,42 @@ class LSTMTrainer:
             self.logger.warning("Starting training from scratch due to checkpoint loading failure.")
             return 0, float('inf')
 
-    def evaluate_test_set(self, model, test_data, hyperparams):
-        """
-        Evaluate the model on the test set and return predictions and targets.
-        """
-        test_loader = self._create_dataloader(test_data, hyperparams['seq_length'], hyperparams['batch_size'])
-        _, predictions, targets = self._evaluate(model, test_loader, nn.MSELoss(), return_predictions=True)
-        return predictions, targets
+    def evaluate_test_set(self, model, test_dataset, hyperparams):
+        try:
+            self.logger.info("Starting model evaluation on the test set.")
+            test_loader = self._create_dataloader(test_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
+            
+            if test_loader is None or len(test_loader) == 0:
+                self.logger.error("Test DataLoader is empty or None. Cannot evaluate.")
+                return None, None, None, None, None, None
+
+            test_loss, r2, predictions, targets, permnos, dates = self._evaluate(
+                model, test_loader, nn.MSELoss(), return_predictions=True
+            )
+            
+            self.logger.info(f"Test Loss: {test_loss:.4f}")
+            self.logger.info(f"Test R² Score: {r2:.4f}")
+            
+            # Convert predictions and targets to NumPy arrays
+            predictions_array = np.array(predictions)
+            targets_array = np.array(targets)
+
+            # Calculate MAE and RMSE
+            mae = np.mean(np.abs(predictions_array - targets_array))
+            rmse = np.sqrt(np.mean((predictions_array - targets_array) ** 2))
+
+            self.logger.info(f"Mean Absolute Error: {mae:.4f}")
+            self.logger.info(f"Root Mean Squared Error: {rmse:.4f}")
+            
+            # Log distribution of predictions and targets
+            self.logger.info(f"Predictions statistics: \n{pd.Series(predictions).describe()}")
+            self.logger.info(f"Targets statistics: \n{pd.Series(targets).describe()}")
+            
+            return test_loss, r2, predictions, targets, permnos, dates
+        except Exception as e:
+            self.logger.error(f"An error occurred during evaluation: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return None, None, None, None, None, None
 
     def adjust_sequence_length(self, min_group_length):
         """
@@ -451,3 +482,74 @@ class LSTMTrainer:
             best_model_path = os.path.join(self.model_weights_dir, 'best_model.pth')
             torch.save(model_state_dict, best_model_path)
             self.logger.info(f"Best model saved to {best_model_path}")
+
+    def create_future_data_loader(self, future_data, seq_length, batch_size):
+        self.data_processor.stock_data = future_data
+        self.data_processor.preprocess_data()
+        return self._create_dataloader(self.data_processor.stock_data, seq_length, batch_size)
+    
+    def predict_future_data(self, model, future_data_loader):
+        model.eval()
+        predictions = []
+        with torch.no_grad():
+            for batch_X, _, _ in future_data_loader:  # Ignore target and index
+                batch_X = batch_X.to(self.device, non_blocking=True)
+                outputs = model(batch_X).squeeze(-1)
+                predictions.extend(outputs.cpu().numpy())
+        return predictions
+
+    def load_model(self, model_path, hyperparams):
+        """
+        Load the model from the specified file.
+        """
+        input_size = len(self.feature_cols)
+        model = LSTMModel(input_size=input_size, **hyperparams).to(self.device)
+        model_state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
+        model.load_state_dict(model_state_dict)
+        model.to(self.device)
+        model.eval()
+        return model
+
+    def predict_over_data(self, model, data_loader, hyperparams):
+        """
+        Make predictions over the data provided by the data loader.
+        """
+        model.eval()
+        predictions = []
+        targets = []
+        permnos = []
+        dates = []
+
+        with torch.no_grad():
+            for batch_idx, (X_batch, y_batch, permno_batch, date_batch) in enumerate(data_loader):
+                X_batch = X_batch.to(self.device)
+                output = model(X_batch).squeeze()
+                outputs_np = output.cpu().numpy()
+                y_batch_np = y_batch.cpu().numpy()
+
+                predictions.extend(outputs_np)
+                targets.extend(y_batch_np)
+                permnos.extend(permno_batch)
+                dates.extend(date_batch)
+
+        # Convert dates to pandas Timestamps if necessary
+        dates = pd.to_datetime(dates)
+
+        self.logger.info(f"Total predictions collected: {len(predictions)}")
+        self.logger.info(f"Total targets collected: {len(targets)}")
+        self.logger.info(f"Total permnos collected: {len(permnos)}")
+        self.logger.info(f"Total dates collected: {len(dates)}")
+
+        return np.array(predictions), np.array(targets), np.array(permnos), dates
+    
+    def check_model_exists(self, model_filename):
+        """
+        Check if a model file exists in the model weights directory.
+        """
+        model_path = os.path.join(self.model_weights_dir, model_filename)
+        exists = os.path.exists(model_path)
+        if exists:
+            self.logger.info(f"Model file '{model_filename}' found at {model_path}.")
+        else:
+            self.logger.info(f"Model file '{model_filename}' not found in {self.model_weights_dir}.")
+        return exists

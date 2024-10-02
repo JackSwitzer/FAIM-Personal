@@ -1,5 +1,5 @@
 import numpy as np
-import datetime
+from datetime import datetime
 import traceback
 import os
 import torch
@@ -24,6 +24,7 @@ class RegressionModels:
         self.Y_mean = Y_mean
         self.models = {}
         self.predictions = {}
+        self.hyperparams = {}  # Add this to store hyperparameters
         self.out_dir = out_dir
         os.makedirs(self.out_dir, exist_ok=True)
     
@@ -87,6 +88,20 @@ class RegressionModels:
         except Exception as e:
             self.logger.error(f"Failed to save hyperparameters for '{model_name}': {str(e)}")
             self.logger.error(traceback.format_exc())
+    
+    def load_hyperparams(self, model_name):
+        """Load hyperparameters from a JSON file."""
+        try:
+            file_name = f"{model_name}_best_hyperparams.json"
+            file_path = os.path.join(self.out_dir, file_name)
+            with open(file_path, 'r') as f:
+                hyperparams = json.load(f)
+            self.hyperparams[model_name] = hyperparams
+            self.logger.info(f"Hyperparameters for '{model_name}' loaded from: {file_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to load hyperparameters for '{model_name}': {str(e)}")
+            self.logger.error(traceback.format_exc())
+            self.hyperparams[model_name] = {}  # Use default hyperparameters
     
     def optimize_lasso_hyperparameters(self, X_train, Y_train_dm, n_trials=100):
         """Optimize Lasso hyperparameters using Optuna."""

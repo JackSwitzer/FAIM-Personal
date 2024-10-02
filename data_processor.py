@@ -6,49 +6,72 @@ from sklearn.decomposition import PCA
 from multiprocessing import Pool
 from itertools import chain
 import logging
+import traceback
 
 from config import Config
-from utils import get_logger
+from utils import get_logger, custom_collate
 
 from torch.utils.data import DataLoader, Dataset
 
 class SequenceDataset(Dataset):
-    def __init__(self, data, seq_length, feature_cols, target_col):
-        # Reset index to ensure consistency
-        data = data.sort_values(['permno', 'date']).reset_index(drop=True)
+    def __init__(self, data, seq_length, feature_cols, target_col, config=None):
         self.seq_length = seq_length
         self.feature_cols = feature_cols
         self.target_col = target_col
-        self.indices = self._create_indices(data)
-        
-        # Convert the necessary data to NumPy arrays
-        self.features = data[self.feature_cols].values.astype(np.float32)
-        self.targets = data[self.target_col].values.astype(np.float32)
-        self.permnos = data['permno'].values
-        self.dates = data['date'].values
+        self.config = config or Config  # Use passed config or default to Config
+        self.id_column = 'permco' if self.config.USE_PERMCO else 'permno'
 
-    def _create_indices(self, data):
-        indices = []
-        grouped = data.groupby('permno', as_index=False, sort=False)
+        # Reset index and store the original index in a column
+        self.data = data.reset_index(drop=False)  # Keep the original index in the 'index' column
+        self.data.rename(columns={'index': 'original_index'}, inplace=True)
+        self.data.reset_index(drop=True, inplace=True)  # Now reset the index
+        self.data_indices = self.data['original_index'].values  # Original DataFrame indices
+
+        self.features = self.data[self.feature_cols].values.astype(np.float32)
+        self.targets = self.data[self.target_col].values.astype(np.float32)
+
+        # Store `permno` or `permco` and `date` as numpy arrays
+        self.ids = self.data[self.id_column].values
+        self.dates = self.data['date'].values
+
+        self.sequence_end_indices = self._create_sequence_indices()
+
+    def _create_sequence_indices(self):
+        sequence_end_indices = []
+        grouped = self.data.groupby('permno')
         for _, group in grouped:
-            group_indices = group.index.to_list()
-            num_sequences = len(group_indices) - self.seq_length + 1
-            if num_sequences <= 0:
-                continue
-            for i in range(num_sequences):
-                start_idx = group_indices[i]
-                end_idx = start_idx + self.seq_length - 1
-                indices.append((start_idx, end_idx))
-        return indices
+            group_indices = group.index.values
+            if len(group_indices) >= self.seq_length:
+                for i in range(len(group_indices) - self.seq_length + 1):
+                    seq_end_idx = group_indices[i + self.seq_length - 1]
+                    sequence_end_indices.append(seq_end_idx)
+        return sequence_end_indices
 
     def __len__(self):
-        return len(self.indices)
+        return len(self.sequence_end_indices)
 
     def __getitem__(self, idx):
-        start_idx, end_idx = self.indices[idx]
-        seq = self.features[start_idx:end_idx + 1]
-        target = self.targets[end_idx]  # Target at the last time step
-        return torch.from_numpy(seq), torch.tensor(target)
+        seq_end_idx = self.sequence_end_indices[idx]
+        seq_start_idx = seq_end_idx - self.seq_length
+
+        # Inputs: features from seq_start_idx to seq_end_idx-1
+        seq = self.features[seq_start_idx:seq_end_idx]
+
+        # Target: value at seq_end_idx
+        target = self.targets[seq_end_idx]
+
+        # Permno and date at seq_end_idx
+        permno = self.permnos[seq_end_idx]
+        date = self.dates[seq_end_idx]
+
+        return torch.from_numpy(seq), torch.tensor(target), permno, date
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
 class DataProcessor:
     """
@@ -137,6 +160,12 @@ class DataProcessor:
             self.logger.error("Infinite values found in feature columns after preprocessing.")
             raise ValueError("Infinite values found in feature columns after preprocessing.")
 
+        # Check for missing values in critical columns
+        critical_cols = ['stock_exret', 'ret_eom', 'rf'] + self.feature_cols
+        missing_values = self.stock_data[critical_cols].isnull().sum()
+        if missing_values.sum() > 0:
+            self.logger.warning(f"Missing values found in critical columns:\n{missing_values[missing_values > 0]}")
+
         # Apply PCA
         pca = PCA(n_components=35)
         pca_result = pca.fit_transform(self.stock_data[self.feature_cols])
@@ -168,7 +197,26 @@ class DataProcessor:
         # Update feature columns
         self.feature_cols = list(pca_df.columns) + list(cyclical_features.columns)
 
+        # Log the target variable
+        self.logger.info(f"Target variable: {self.ret_var}")
+        self.logger.info(f"Target variable statistics: \n{self.stock_data[self.ret_var].describe()}")
+
         self.logger.info(f"Data preprocessing completed. Number of features after PCA and cyclical features: {len(self.feature_cols)}")
+
+        # Ensure data is sorted by stock identifier and date
+        self.stock_data.sort_values(['permno', 'date'], inplace=True)
+
+        # Create lagged target variable (e.g., one period lag)
+        self.stock_data['stock_exret_lag1'] = self.stock_data.groupby('permno')[self.ret_var].shift(1)
+
+        # Remove rows with NaN in lagged features (due to shifting)
+        self.stock_data.dropna(subset=['stock_exret_lag1'], inplace=True)
+
+        # Update feature_cols to include the lagged target variable
+        self.feature_cols.append('stock_exret_lag1')
+
+        # Update feature_cols after PCA
+        self.feature_cols = list(pca_df.columns) + list(cyclical_features.columns) + ['stock_exret_lag1']
 
     def split_data(self, method='time'):
         """Split the data into train, validation, and test sets."""
@@ -216,6 +264,13 @@ class DataProcessor:
                 self.test_data = sorted_data.iloc[train_size + val_size:].reset_index(drop=True)
 
                 self.logger.info("Data split using time-based method without limiting test data period.")
+
+        # Log statistics about each dataset
+        for name, dataset in [('Train', self.train_data), ('Validation', self.val_data), ('Test', self.test_data)]:
+            self.logger.info(f"{name} dataset stats:")
+            self.logger.info(f"  Number of unique stocks: {dataset[self.id_column].nunique()}")
+            self.logger.info(f"  Date range: {dataset['date'].min()} to {dataset['date'].max()}")
+            self.logger.info(f"  Number of sequences: {len(SequenceDataset(dataset, self.seq_length, self.feature_cols, self.ret_var))}")
 
         self.logger.info(f"Data split completed. Train: {len(self.train_data)}, Val: {len(self.val_data)}, Test: {len(self.test_data)}")
 
@@ -402,11 +457,22 @@ class DataProcessor:
         if self.test_data is not None:
             self.logger.info(f"Minimum sequence length in test data: {self.test_data.groupby(self.id_column).size().min()}")
 
-    def create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
-        dataset = SequenceDataset(data, seq_length, self.feature_cols, self.ret_var)
-        return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+    def create_dataloader(self, data, seq_length, batch_size, num_workers=0):
+        try:
+            dataset = SequenceDataset(data, seq_length, self.feature_cols, self.ret_var)
+            return DataLoader(
+                dataset,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=True,
+                shuffle=False,
+                collate_fn=custom_collate
+            )
+        except Exception as e:
+            self.logger.error(f"Error creating DataLoader: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return None
 
-        
     def get_min_group_length_across_splits(self):
         """
         Get the minimum group length across all splits after filtering.

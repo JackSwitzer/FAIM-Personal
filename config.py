@@ -13,8 +13,8 @@ class Config:
 
     # Distributed training settings
     GPUS_PER_NODE = torch.cuda.device_count() if torch.cuda.is_available() else 0
-    WORLD_SIZE = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    USE_DISTRIBUTED = WORLD_SIZE > 1
+    WORLD_SIZE = 1  # Set to 1 for single GPU training
+    USE_DISTRIBUTED = False  # Set to False to disable distributed training
 
     # Data processing settings
     TARGET_VARIABLE = 'stock_exret'
@@ -45,7 +45,7 @@ class Config:
             'optimizer_name': 'AdamW',  # Switched to AdamW optimizer
             'learning_rate': 1e-3,  # Kept the same
             'weight_decay': 1e-5,   # Increased weight decay for regularization
-            'seq_length': 7,       # Increased sequence length
+            'seq_length': 15,       # Increased sequence length
             'batch_size': BATCH_SIZE,
             'use_scheduler': True,
             'scheduler_factor': 0.5,
@@ -53,8 +53,10 @@ class Config:
         }
 
     # Hyperparameter optimization settings
-    N_TRIALS = 20  # Number of trials for hyperparameter tuning
+    N_TRIALS = 50  # Number of trials for hyperparameter tuning
     HYPEROPT_EPOCHS = 10  # Number of epochs during hyperparameter tuning
+    OPTIMIZE_REGRESSION_MODELS = True
+    RUN_REGRESSION_MODELS = True  # Set to True if you want to run regression models
 
     # Logging settings
     LOG_INTERVAL = 10  # Log every 5 epochs
