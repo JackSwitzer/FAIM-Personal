@@ -5,7 +5,7 @@ import multiprocessing
 class Config:
     # General settings
     SEED = 42
-    DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     OUT_DIR = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Output"
     MODEL_WEIGHTS_DIR = os.path.join(OUT_DIR, "model_weights")
     DATA_INPUT_DIR = r"C:\Users\jacks\Documents\Code\McGill FAIM\Data Input"

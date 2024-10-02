@@ -120,8 +120,8 @@ class RegressionModels:
         """Optimize Ridge hyperparameters using Optuna."""
         try:
             def objective(trial):
-                alpha = trial.suggest_float('alpha', 1e-6, 1e5, log=True)
                 max_iter = trial.suggest_int('max_iter', 1000, 100000)
+                alpha = trial.suggest_float('alpha', 1e-6, 1e2, log=True)
                 tol = trial.suggest_float('tol', 1e-6, 1e-1, log=True)
                 ridge = Ridge(fit_intercept=False, alpha=alpha, max_iter=max_iter, tol=tol)
                 scores = cross_val_score(ridge, X_train, Y_train_dm, cv=5,

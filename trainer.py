@@ -333,8 +333,8 @@ class LSTMTrainer:
                 'hidden_size': trial.suggest_int('hidden_size', 64, 512),  # Increased upper limit
                 'num_layers': trial.suggest_int('num_layers', 1, 4),
                 'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5),
-                'learning_rate': trial.suggest_loguniform('learning_rate', 1e-5, 1e-2),
-                'weight_decay': trial.suggest_loguniform('weight_decay', 1e-6, 1e-3),
+                'learning_rate': trial.suggest_float('learning_rate', 1e-5, 1e-2, log=True),
+                'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
                 'seq_length': trial.suggest_int('seq_length', 5, 30),  # Increased upper limit
                 'batch_size': Config.BATCH_SIZE 
             }
@@ -362,9 +362,8 @@ class LSTMTrainer:
         return best_hyperparams, study.best_trial
 
     def evaluate_validation_loss(self, model, val_loader, hyperparams):
-        """Evaluate the model on the validation set and return the loss."""
-        val_loss, _, _ = self._evaluate(model, val_loader, nn.MSELoss())
-        return val_loss
+       val_loss = self._evaluate(model, val_loader, nn.MSELoss())
+       return val_loss
 
     def load_hyperparams(self, is_best=True):
         # Adjust method to load hyperparameters for the single target variable
