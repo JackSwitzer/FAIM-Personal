@@ -86,71 +86,115 @@ def main_Regression(rank, world_size):
         logger.info("Regression run completed.")
 
 def main_worker(rank, world_size, config, use_distributed):
-    setup(rank, world_size, use_distributed=use_distributed)
-    set_seed(config.SEED + rank)  # Ensure different seeds for each process
-    setup_logging(config.OUT_DIR, f"train_log_rank_{rank}.log")
+    setup(rank, world_size)
+    out_dir = config.OUT_DIR
+    setup_logging(out_dir)
+    logger = logging.getLogger(__name__)  # Use module-level logger
+    set_seed()
 
-    # Set device for this process
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
-    
-    logger = get_logger('stock_predictor')
-    logger.info(f"Using device: {device}")
+    try:
+        data_input_dir = config.DATA_INPUT_DIR
+        full_data_path = config.FULL_DATA_PATH
+        target_variable = config.TARGET_VARIABLE
+        logger.info(f"Target variable set to: {target_variable}")
 
-    # Initialize DataProcessor with the option to use permco
-    data_processor = DataProcessor(
-        config.FULL_DATA_PATH,
-        ret_var=config.TARGET_VARIABLE,
-        use_permco=config.USE_PERMCO  # Add this option to your Config class
-    )
-    data_processor.load_data()
-    data_processor.preprocess_data()
-    data_processor.split_data()
-    data_processor.filter_stocks_by_min_length_in_splits()
+        # Data processing
+        processor = DataProcessor(
+            data_in_path=full_data_path,
+            ret_var=target_variable,
+            standardize=config.STANDARDIZE,
+            seq_length=config.LSTM_PARAMS.get('seq_length', 10),
+            config=config
+        )
+        processor.load_data()
+        processor.preprocess_and_split_data()
 
-    # Ensure seq_length is adjusted based on min_group_length
-    min_group_length = data_processor.get_min_group_length()
-    seq_length = min(config.LSTM_PARAMS.get('seq_length', 10), min_group_length)
+        # Retrieve the minimum group length across splits
+        min_group_length = processor.get_min_group_length_across_splits()
+        logger.info(f"Minimum group length across splits: {min_group_length}")
 
-    # Initialize trainer with updated feature columns and input size
-    trainer = LSTMTrainer(
-        feature_cols=data_processor.feature_cols,
-        target_col=data_processor.ret_var,
-        device=device,
-        config=config,
-        rank=rank,
-        world_size=world_size,
-        use_distributed=use_distributed
-    )
-    trainer.adjust_sequence_length(min_group_length)
+        # Adjust the sequence length if necessary
+        max_seq_length = min(min_group_length, 30)  # Assuming 30 is your maximum desired seq_length
+        config.LSTM_PARAMS['seq_length'] = max_seq_length
+        logger.info(f"Sequence length adjusted to: {max_seq_length}")
 
-    # Now pass datasets to optimize_hyperparameters
-    train_dataset = data_processor.train_data
-    val_dataset = data_processor.val_data
-    test_dataset = data_processor.test_data
+        # Create datasets
+        train_dataset = processor.train_data
+        val_dataset = processor.val_data
+        test_dataset = processor.test_data
 
-    # Load or optimize hyperparameters
-    hyperparams = trainer.load_hyperparams(is_best=True)
-    if hyperparams is None:
-        hyperparams, _ = trainer.optimize_hyperparameters(
-            train_dataset, val_dataset, test_dataset, n_trials=config.N_TRIALS
+        # Initialize trainer
+        trainer = LSTMTrainer(
+            feature_cols=processor.feature_cols,
+            target_col=target_variable,
+            device=config.DEVICE,
+            config=config,
+            rank=rank,
+            world_size=world_size,
+            use_distributed=use_distributed
         )
 
-    # Create data loaders with optimized hyperparameters
-    seq_length = hyperparams['seq_length']
-    batch_size = hyperparams['batch_size']
-    train_loader = trainer._create_dataloader(train_dataset, seq_length, batch_size)
-    val_loader = trainer._create_dataloader(val_dataset, seq_length, batch_size)
-    test_loader = trainer._create_dataloader(test_dataset, seq_length, batch_size)
+        # Check if hyperparameters have already been optimized
+        hyperparams = trainer.load_hyperparams(is_best=True)
+        if hyperparams is not None:
+            logger.info("Best hyperparameters found. Skipping hyperparameter optimization.")
+        else:
+            # Optimize hyperparameters
+            logger.info("Starting hyperparameter optimization.")
+            hyperparams, _ = trainer.optimize_hyperparameters(
+                train_dataset, val_dataset, test_dataset, n_trials=config.N_TRIALS
+            )
+            logger.info("Hyperparameter optimization completed.")
 
-    # Train the model
-    model, training_history = trainer.train_model(train_loader, val_loader, test_loader, hyperparams)
+        # Update sequence length and batch size based on the best hyperparameters
+        seq_length = hyperparams['seq_length']
+        batch_size = hyperparams['batch_size']
+        logger.info(f"Using seq_length: {seq_length} and batch_size: {batch_size} for training and evaluation.")
 
-    # Clean up
-    cleanup(use_distributed)
+        # Create data loaders with optimized hyperparameters
+        train_loader = trainer._create_dataloader(train_dataset, seq_length, batch_size)
+        val_loader = trainer._create_dataloader(val_dataset, seq_length, batch_size) if val_dataset is not None and not val_dataset.empty else None
+        test_loader = trainer._create_dataloader(test_dataset, seq_length, batch_size) if test_dataset is not None and not test_dataset.empty else None
+
+        # Check if the full model has already been trained
+        if trainer.check_model_exists('final_model.pth'):
+            logger.info("Final model found. Skipping full training.")
+            # Load the final trained model
+            model = trainer.load_model(os.path.join(config.MODEL_WEIGHTS_DIR, 'final_model.pth'), hyperparams)
+        else:
+            # Perform a full training run with the best hyperparameters
+            logger.info("Starting full training run with the best hyperparameters.")
+            model, training_history = trainer.train_model(train_loader, val_loader, test_loader, hyperparams)
+
+        # Evaluate the model on the test set
+        logger.info("Evaluating the model on the test set.")
+        test_loss, r2_score, predictions, targets = trainer.evaluate_test_set(model, test_dataset, hyperparams)
+        logger.info(f"Test Loss: {test_loss}, R² Score: {r2_score}")
+
+        # Make rolling predictions over the entire dataset
+        logger.info("Making rolling predictions over the entire dataset.")
+        # Combine the train, validation, and test datasets
+        all_data = pd.concat([processor.train_data, processor.val_data, processor.test_data])
+
+        # Create a DataLoader for the entire dataset without shuffling
+        full_loader = trainer._create_dataloader(all_data, seq_length, batch_size, shuffle=False)
+
+        # Make predictions
+        all_predictions, all_targets = trainer.predict_over_data(model, full_loader, hyperparams)
+
+        # Save predictions
+        logger.info("Saving predictions for the entire dataset.")
+        results_df = all_data.copy()
+        results_df['Predictions'] = all_predictions
+        results_df['Targets'] = all_targets
+        results_df.to_csv(os.path.join(config.OUT_DIR, 'full_dataset_predictions.csv'), index=False)
+
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        logger.error(traceback.format_exc())
+    finally:
+        cleanup(use_distributed)
+        logger.info("Training run completed.")
 
 def main():
     world_size = torch.cuda.device_count()
@@ -164,5 +208,5 @@ def main():
         main_worker(0, 1, Config, use_distributed)
 
 if __name__ == '__main__':
-    main()
-     # main_Regression()
+    main()     
+    # main_Regression()

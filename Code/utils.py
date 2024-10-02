@@ -41,22 +41,22 @@ def setup_logging(log_dir, log_filename=None, rank=0):
     logger.setLevel(logging.INFO)
     logger.propagate = False  # Prevent messages from propagating to the root logger
     
-    # Check if handlers are already set up to avoid duplicate logs
-    if not getattr(logger, 'handler_set', None):
-        formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
-        
-        # Console handler
-        ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
-        if rank == 0:
-            logger.addHandler(ch)
+    # Remove any existing handlers to prevent duplicate logs
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s')
+    
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    if rank == 0:
+        logger.addHandler(ch)
 
-        # File handler with rotation
-        fh = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-        
-        logger.handler_set = True  # Custom attribute to prevent duplicate handlers
+    # File handler with rotation
+    fh = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
 
     logger.info(f"Logging initialized. Log file: {log_file}")
 

@@ -1,20 +1,9 @@
 {
-    "seq_length": 4,
-    "batch_size": 512,
-    "learning_rate": 0.0013725797021770785,
-    "hidden_size": 512,
-    "num_layers": 4,
-    "dropout_rate": 0.21437288120341638,
-    "bidirectional": false,
-    "use_batch_norm": true,
-    "activation_function": "LeakyReLU",
-    "fc1_size": 64,
-    "fc2_size": 32,
-    "optimizer_name": "Adam",
-    "weight_decay": 0.000042,
-    "use_scheduler": true,
-    "scheduler_factor": 0.1,
-    "scheduler_patience": 5,
-    "clip_grad_norm": 1.0,
-    "accumulation_steps": 1
+    "hidden_size": 224,
+    "num_layers": 2,
+    "dropout_rate": 0.28682275862537826,
+    "learning_rate": 4.0259454691295325e-05,
+    "weight_decay": 0.00029694525602354835,
+    "seq_length": 19,
+    "batch_size": 512
 }

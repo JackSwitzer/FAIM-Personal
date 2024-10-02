@@ -16,15 +16,20 @@ class SequenceDataset(Dataset):
     def __init__(self, data, seq_length, feature_cols, target_col):
         # Reset index to ensure consistency
         data = data.sort_values(['permno', 'date']).reset_index(drop=True)
-        self.data = data
         self.seq_length = seq_length
         self.feature_cols = feature_cols
         self.target_col = target_col
-        self.indices = self._create_indices()
+        self.indices = self._create_indices(data)
+        
+        # Convert the necessary data to NumPy arrays
+        self.features = data[self.feature_cols].values.astype(np.float32)
+        self.targets = data[self.target_col].values.astype(np.float32)
+        self.permnos = data['permno'].values
+        self.dates = data['date'].values
 
-    def _create_indices(self):
+    def _create_indices(self, data):
         indices = []
-        grouped = self.data.groupby('permno', as_index=False, sort=False)
+        grouped = data.groupby('permno', as_index=False, sort=False)
         for _, group in grouped:
             group_indices = group.index.to_list()
             num_sequences = len(group_indices) - self.seq_length + 1
@@ -41,16 +46,15 @@ class SequenceDataset(Dataset):
 
     def __getitem__(self, idx):
         start_idx, end_idx = self.indices[idx]
-        seq_data = self.data.iloc[start_idx:end_idx + 1]
-        seq = seq_data[self.feature_cols].values.astype(np.float32)
-        target = seq_data[self.target_col].values[-1].astype(np.float32)
+        seq = self.features[start_idx:end_idx + 1]
+        target = self.targets[end_idx]  # Target at the last time step
         return torch.from_numpy(seq), torch.tensor(target)
 
 class DataProcessor:
     """
     A class to handle data loading, preprocessing, transformation, and splitting.
     """
-    def __init__(self, data_in_path, ret_var='stock_exret', standardize=True, seq_length=10, use_permco=False):
+    def __init__(self, data_in_path, ret_var='stock_exret', standardize=True, seq_length=10, config=None):
         self.logger = get_logger('stock_predictor')
         self.ret_var = ret_var
         self.data_in_path = data_in_path
@@ -62,8 +66,8 @@ class DataProcessor:
         self.val_data = None
         self.test_data = None
         self.seq_length = seq_length  # Add seq_length attribute
-        self.use_permco = use_permco
-        self.id_column = 'permco' if use_permco else 'permno'
+        self.config = config  # Pass the config object
+        self.id_column = 'permco' if self.config.USE_PERMCO else 'permno'
 
     def load_data(self):
         """Load the data from the CSV file and optimize data types."""
@@ -105,66 +109,113 @@ class DataProcessor:
         """Preprocess the data: handle missing values, select features, standardize, apply PCA, and add seasonal variables."""
         self.logger.info("Starting data preprocessing...")
 
-        # Handle missing values and select features
+        # Handle missing values (replace with zero)
         self.stock_data = self.stock_data.fillna(0)
-        non_feature_cols = ["date", "permno", self.ret_var]
-        self.feature_cols = [col for col in self.stock_data.columns if col not in non_feature_cols]
+
+        # Exclude non-feature columns
+        non_feature_cols = ["date", self.id_column, self.ret_var]
+
+        # Only select numeric columns
+        numeric_cols = self.stock_data.select_dtypes(include=[np.number]).columns.tolist()
+
+        # Get feature columns by excluding non-feature columns
+        self.feature_cols = [col for col in numeric_cols if col not in non_feature_cols]
+
+        # Log the feature columns
+        self.logger.info(f"Selected {len(self.feature_cols)} numeric feature columns.")
 
         # Standardization
         if self.standardize:
             self.scaler = StandardScaler()
             self.stock_data[self.feature_cols] = self.scaler.fit_transform(self.stock_data[self.feature_cols])
 
+        # Check for NaNs and infinite values
+        if self.stock_data[self.feature_cols].isnull().values.any():
+            self.logger.error("NaN values found in feature columns after preprocessing.")
+            raise ValueError("NaN values found in feature columns after preprocessing.")
+        if np.isinf(self.stock_data[self.feature_cols].values).any():
+            self.logger.error("Infinite values found in feature columns after preprocessing.")
+            raise ValueError("Infinite values found in feature columns after preprocessing.")
+
         # Apply PCA
         pca = PCA(n_components=35)
         pca_result = pca.fit_transform(self.stock_data[self.feature_cols])
         pca_df = pd.DataFrame(data=pca_result, columns=[f'PC{i+1}' for i in range(35)])
 
-        # Create cyclical features
-        self.stock_data['month'] = pd.to_datetime(self.stock_data['date']).dt.month
-        self.stock_data['day_of_week'] = pd.to_datetime(self.stock_data['date']).dt.dayofweek
-        self.stock_data['quarter'] = pd.to_datetime(self.stock_data['date']).dt.quarter
+        # Create date features
+        date_features = pd.DataFrame({
+            'month': self.stock_data['date'].dt.month,
+            'day_of_week': self.stock_data['date'].dt.dayofweek,
+            'quarter': self.stock_data['date'].dt.quarter
+        })
 
+        # Create cyclical features
         cyclical_features = pd.DataFrame({
-            'month_sin': np.sin(2 * np.pi * self.stock_data['month'] / 12),
-            'month_cos': np.cos(2 * np.pi * self.stock_data['month'] / 12),
-            'day_of_week_sin': np.sin(2 * np.pi * self.stock_data['day_of_week'] / 7),
-            'day_of_week_cos': np.cos(2 * np.pi * self.stock_data['day_of_week'] / 7),
-            'quarter_sin': np.sin(2 * np.pi * self.stock_data['quarter'] / 4),
-            'quarter_cos': np.cos(2 * np.pi * self.stock_data['quarter'] / 4),
+            'month_sin': np.sin(2 * np.pi * date_features['month'] / 12),
+            'month_cos': np.cos(2 * np.pi * date_features['month'] / 12),
+            'day_of_week_sin': np.sin(2 * np.pi * date_features['day_of_week'] / 7),
+            'day_of_week_cos': np.cos(2 * np.pi * date_features['day_of_week'] / 7),
+            'quarter_sin': np.sin(2 * np.pi * date_features['quarter'] / 4),
+            'quarter_cos': np.cos(2 * np.pi * date_features['quarter'] / 4),
         })
 
         # Combine PCA results and cyclical features
-        self.stock_data = pd.concat([self.stock_data, pca_df, cyclical_features], axis=1)
+        self.stock_data = pd.concat(
+            [self.stock_data.reset_index(drop=True), pca_df, cyclical_features],
+            axis=1
+        )
 
         # Update feature columns
         self.feature_cols = list(pca_df.columns) + list(cyclical_features.columns)
 
-        self.logger.info(f"Data preprocessing completed. Number of features: {len(self.feature_cols)}")
+        self.logger.info(f"Data preprocessing completed. Number of features after PCA and cyclical features: {len(self.feature_cols)}")
 
     def split_data(self, method='time'):
         """Split the data into train, validation, and test sets."""
         if method == 'time':
             # Implement time-based splitting logic
             sorted_data = self.stock_data.sort_values('date')
-            train_size = int(0.8 * len(sorted_data))
-            val_size = int(0.1 * len(sorted_data))
-            self.train_data = sorted_data.iloc[:train_size]
-            self.val_data = sorted_data.iloc[train_size:train_size+val_size]
-            self.test_data = sorted_data.iloc[train_size+val_size:]
-        else:
-            # Existing random splitting logic
-            unique_permnos = self.stock_data['permno'].unique()
-            np.random.shuffle(unique_permnos)
-            train_size = int(0.7 * len(unique_permnos))
-            val_size = int(0.15 * len(unique_permnos))
-            train_permnos = unique_permnos[:train_size]
-            val_permnos = unique_permnos[train_size:train_size+val_size]
-            test_permnos = unique_permnos[train_size+val_size:]
 
-            self.train_data = self.stock_data[self.stock_data['permno'].isin(train_permnos)]
-            self.val_data = self.stock_data[self.stock_data['permno'].isin(val_permnos)]
-            self.test_data = self.stock_data[self.stock_data['permno'].isin(test_permnos)]
+            # Use the test data period from Config
+            test_period_months = self.config.TEST_DATA_PERIOD_MONTHS
+
+            if test_period_months and test_period_months > 0:
+                max_date = sorted_data['date'].max()
+                test_start_date = max_date - pd.DateOffset(months=test_period_months)
+
+                # Check if test_start_date is before min date
+                if test_start_date < sorted_data['date'].min():
+                    self.logger.warning("Test period is larger than data range. Setting test_start_date to min date.")
+                    test_start_date = sorted_data['date'].min()
+
+                # Training and validation data before test_start_date
+                train_val_data = sorted_data[sorted_data['date'] < test_start_date].reset_index(drop=True)
+                test_data = sorted_data[sorted_data['date'] >= test_start_date].reset_index(drop=True)
+
+                # If test_data is empty, adjust test_start_date
+                if test_data.empty:
+                    self.logger.warning("Test data is empty with the current TEST_DATA_PERIOD_MONTHS.")
+                    self.logger.warning("Adjusting test data period to include more data.")
+                    # Set test_start_date to a date that ensures at least some test data
+                    test_start_date = sorted_data['date'].max() - pd.DateOffset(months=1)
+                    test_data = sorted_data[sorted_data['date'] >= test_start_date].reset_index(drop=True)
+                    train_val_data = sorted_data[sorted_data['date'] < test_start_date].reset_index(drop=True)
+
+                train_size = int(0.8 * len(train_val_data))
+                self.train_data = train_val_data.iloc[:train_size]
+                self.val_data = train_val_data.iloc[train_size:]
+                self.test_data = test_data
+
+                self.logger.info(f"Data split using time-based method with test period starting from {test_start_date.date()}.")
+            else:
+                # Original splitting logic without limiting test data
+                train_size = int(0.8 * len(sorted_data))
+                val_size = int(0.1 * len(sorted_data))
+                self.train_data = sorted_data.iloc[:train_size].reset_index(drop=True)
+                self.val_data = sorted_data.iloc[train_size:train_size + val_size].reset_index(drop=True)
+                self.test_data = sorted_data.iloc[train_size + val_size:].reset_index(drop=True)
+
+                self.logger.info("Data split using time-based method without limiting test data period.")
 
         self.logger.info(f"Data split completed. Train: {len(self.train_data)}, Val: {len(self.val_data)}, Test: {len(self.test_data)}")
 
@@ -174,7 +225,7 @@ class DataProcessor:
         rounded to the nearest year.
         """
         data = self.stock_data.copy()
-        data.sort_values(['date', 'permno'], inplace=True)
+        data.sort_values(['date', self.id_column], inplace=True)
 
         # Get the minimum and maximum dates
         min_date = data['date'].min()
@@ -250,7 +301,7 @@ class DataProcessor:
     def create_sequences(self, data, seq_length):
         """Create sequences of data for LSTM training."""
         sequences = []
-        for permno, group in data.groupby('permno'):
+        for id_value, group in data.groupby(self.id_column):
             group = group.sort_values('date')
             if len(group) >= seq_length:
                 for i in range(len(group) - seq_length + 1):
@@ -286,18 +337,18 @@ class DataProcessor:
         """
         if self.train_data is None or self.val_data is None or self.test_data is None:
             self.logger.warning("Data has not been split yet. Returning minimum length from all data.")
-            return self.stock_data.groupby('permno').size().min()
+            return self.stock_data.groupby(self.id_column).size().min()
 
         # Calculate minimum group length in training data
-        train_group_lengths = self.train_data.groupby('permno').size()
+        train_group_lengths = self.train_data.groupby(self.id_column).size()
         min_train_length = train_group_lengths.min() if not train_group_lengths.empty else float('inf')
 
         # Calculate minimum group length in validation data
-        val_group_lengths = self.val_data.groupby('permno').size()
+        val_group_lengths = self.val_data.groupby(self.id_column).size()
         min_val_length = val_group_lengths.min() if not val_group_lengths.empty else float('inf')
 
         # Calculate minimum group length in test data
-        test_group_lengths = self.test_data.groupby('permno').size()
+        test_group_lengths = self.test_data.groupby(self.id_column).size()
         min_test_length = test_group_lengths.min() if not test_group_lengths.empty else float('inf')
 
         # Find the overall minimum
@@ -307,33 +358,62 @@ class DataProcessor:
         return min_group_length
 
     def filter_stocks_by_min_length_in_splits(self):
-        min_len = self.seq_length
-        # Define a helper function
+        min_len = max(self.seq_length, self.config.MIN_SEQUENCE_LENGTH)
+        
         def filter_data(data):
-            group_lengths = data.groupby('permno').size()
-            valid_permnos = group_lengths[group_lengths >= min_len].index
-            return data[data['permno'].isin(valid_permnos)].copy()
+            group_lengths = data.groupby(self.id_column).size()
+            valid_ids = group_lengths[group_lengths >= min_len].index
+            filtered_data = data[data[self.id_column].isin(valid_ids)].copy()
+            return filtered_data if not filtered_data.empty else None
 
         self.train_data = filter_data(self.train_data)
         self.val_data = filter_data(self.val_data)
         self.test_data = filter_data(self.test_data)
 
-        self.logger.info(f"After filtering, train data stocks: {self.train_data['permno'].nunique()}")
-        self.logger.info(f"After filtering, validation data stocks: {self.val_data['permno'].nunique()}")
-        self.logger.info(f"After filtering, test data stocks: {self.test_data['permno'].nunique()}")
+        # Check if any split is empty and log appropriate messages
+        empty_splits = []
+        if self.train_data is None or self.train_data.empty:
+            self.logger.warning("Training data is empty after filtering.")
+            empty_splits.append('train')
+        if self.val_data is None or self.val_data.empty:
+            self.logger.warning("Validation data is empty after filtering.")
+            empty_splits.append('validation')
+        if self.test_data is None or self.test_data.empty:
+            self.logger.warning("Test data is empty after filtering.")
+            empty_splits.append('test')
 
-    def create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
+        if empty_splits:
+            self.logger.warning(f"The following data splits are empty after filtering: {', '.join(empty_splits)}.")
+            self.logger.warning("Proceeding with available data splits.")
+
+        # Log the number of stocks in each split
+        if self.train_data is not None:
+            self.logger.info(f"After filtering, train data stocks: {self.train_data[self.id_column].nunique()}")
+        if self.val_data is not None:
+            self.logger.info(f"After filtering, validation data stocks: {self.val_data[self.id_column].nunique()}")
+        if self.test_data is not None:
+            self.logger.info(f"After filtering, test data stocks: {self.test_data[self.id_column].nunique()}")
+
+        # Log the minimum sequence length in each split
+        if self.train_data is not None:
+            self.logger.info(f"Minimum sequence length in train data: {self.train_data.groupby(self.id_column).size().min()}")
+        if self.val_data is not None:
+            self.logger.info(f"Minimum sequence length in validation data: {self.val_data.groupby(self.id_column).size().min()}")
+        if self.test_data is not None:
+            self.logger.info(f"Minimum sequence length in test data: {self.test_data.groupby(self.id_column).size().min()}")
+
+    def create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS, shuffle=False):
         dataset = SequenceDataset(data, seq_length, self.feature_cols, self.ret_var)
-        return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True)
+        return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=shuffle)
 
         
     def get_min_group_length_across_splits(self):
         """
         Get the minimum group length across all splits after filtering.
         """
-        min_train_length = self.train_data.groupby('permno').size().min()
-        min_val_length = self.val_data.groupby('permno').size().min()
-        min_test_length = self.test_data.groupby('permno').size().min()
+        min_train_length = self.train_data.groupby(self.id_column).size().min()
+        min_val_length = self.val_data.groupby(self.id_column).size().min()
+        min_test_length = self.test_data.groupby(self.id_column).size().min()
 
         min_group_length = min(min_train_length, min_val_length, min_test_length)
         self.logger.info(f"Updated minimum group lengths - Train: {min_train_length}, Validation: {min_val_length}, Test: {min_test_length}")
