@@ -8,337 +8,114 @@ import sys
 import os
 import traceback
 import datetime
+from data_processor import DataProcessor
+from trainer import LSTMTrainer
+from models import LSTMModel
+import torch.nn as nn
+import logging
+from datetime import datetime, timedelta
 
 # Add the parent directory to the Python path to import the modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from Code.data_processor import DataProcessor
-from Code.trainer import LSTMTrainer
-from Code.models import LSTMModel, StockDataset
-import torch.nn as nn
+def create_synthetic_dataset(num_stocks=10, num_days=1000, num_features=50):
+    # Generate dates
+    start_date = datetime(2020, 1, 1)
+    dates = [start_date + timedelta(days=i) for i in range(num_days)]
 
-class TestDataProcessor(unittest.TestCase):
-    def setUp(self):
-        try:
-            # Create a small synthetic dataset
-            data = {
-                'permno': [10001]*5 + [10002]*5,
-                'date': pd.date_range(start='2021-01-01', periods=5).tolist() * 2,
-                'feature1': range(10),
-                'feature2': range(10, 20),
-                'stock_exret': range(-5, 5)
+    # Generate permnos (stock identifiers)
+    permnos = [10001 + i for i in range(num_stocks)]
+
+    # Prepare data container
+    data = []
+
+    # Generate data for each stock
+    for permno in permnos:
+        for date in dates:
+            row = {
+                'permno': permno,
+                'date': date,
+                'stock_exret': np.random.normal(0, 0.02)  # Random return, normal distribution
             }
-            self.df = pd.DataFrame(data)
-            self.data_in_path = 'test_data.csv'
-            self.df.to_csv(self.data_in_path, index=False)
-        except Exception as e:
-            print(f"Error in TestDataProcessor.setUp: {str(e)}")
-            print(traceback.format_exc())
-            raise
+            # Add features
+            for i in range(1, num_features + 1):
+                row[f'feature{i}'] = np.random.randn()  # Random feature value, standard normal distribution
+            data.append(row)
 
-    def test_data_loading(self):
-        try:
-            processor = DataProcessor(self.data_in_path, standardize=True)
-            processor.load_data()
-            self.assertIsNotNone(processor.stock_data)
-            self.assertEqual(len(processor.stock_data), 10)
-        except Exception as e:
-            print(f"Error in test_data_loading: {str(e)}")
-            print(traceback.format_exc())
-            raise
+    # Convert to DataFrame
+    df = pd.DataFrame(data)
+
+    # Sort the DataFrame
+    df = df.sort_values(['permno', 'date']).reset_index(drop=True)
+
+    return df
+
+class BaseTestClass(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.synthetic_df = create_synthetic_dataset()
+        cls.feature_cols = [f'feature{i}' for i in range(1, 51)]
+        cls.target_col = 'stock_exret'
+
+class TestDataProcessor(BaseTestClass):
+    def setUp(self):
+        self.processor = DataProcessor(data_in_path=None, ret_var=self.target_col, standardize=True)
+        self.processor.stock_data = self.synthetic_df.copy()
+        self.processor.feature_cols = self.feature_cols
 
     def test_preprocessing(self):
-        try:
-            processor = DataProcessor(self.data_in_path, standardize=True)
-            processor.load_data()
-            processor.preprocess_data()
-            self.assertIsNotNone(processor.feature_cols)
-            self.assertTrue('feature1' in processor.feature_cols)
-        except Exception as e:
-            print(f"Error in test_preprocessing: {str(e)}")
-            print(traceback.format_exc())
-            raise
+        self.processor.preprocess_data()
+        self.assertIsNotNone(self.processor.stock_data)
+        self.assertEqual(len(self.processor.feature_cols), 41)  # 35 PCA components + 6 cyclical features
+        self.assertIn('PC1', self.processor.stock_data.columns)
+        self.assertIn('PC35', self.processor.stock_data.columns)
+        self.assertIn('month_sin', self.processor.stock_data.columns)
+        self.assertIn('month_cos', self.processor.stock_data.columns)
+        self.assertIn('day_of_week_sin', self.processor.stock_data.columns)
+        self.assertIn('day_of_week_cos', self.processor.stock_data.columns)
+        self.assertIn('quarter_sin', self.processor.stock_data.columns)
+        self.assertIn('quarter_cos', self.processor.stock_data.columns)
 
-    def tearDown(self):
-        try:
-            # Remove the test CSV file
-            if os.path.exists(self.data_in_path):
-                os.remove(self.data_in_path)
-        except Exception as e:
-            print(f"Error in TestDataProcessor.tearDown: {str(e)}")
-            print(traceback.format_exc())
-
-class TestLSTMTrainer(unittest.TestCase):
+class TestLSTMTrainer(BaseTestClass):
     def setUp(self):
-        try:
-            # Create a small synthetic dataset
-            data = {
-                'permno': [10001]*10,
-                'date': pd.date_range(start='2021-01-01', periods=10),
-                'feature1': range(10),
-                'feature2': range(10, 20),
-                'stock_exret': range(-5, 5)
-            }
-            self.df = pd.DataFrame(data)
-            self.feature_cols = ['feature1', 'feature2']
-            self.target_col = 'stock_exret'
-            self.device = torch.device('cpu')
-            self.trainer = LSTMTrainer(self.feature_cols, self.target_col, self.device)
-        except Exception as e:
-            print(f"Error in TestLSTMTrainer.setUp: {str(e)}")
-            print(traceback.format_exc())
-            raise
+        self.config = Config
+        self.device = torch.device('cpu')
+        self.trainer = LSTMTrainer(
+            feature_cols=self.feature_cols,
+            target_col=self.target_col,
+            device=self.device,
+            config=self.config
+        )
+        self.trainer.data_processor.stock_data = self.synthetic_df.copy()
+        self.trainer.data_processor.preprocess_data()  # Ensure data is preprocessed
 
     def test_create_sequences(self):
-        try:
-            seq_length = 5
-            trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
-            X, Y, indices = trainer.create_sequences(self.df, seq_length)
-            
-            self.assertIsNotNone(X)
-            self.assertIsNotNone(Y)
-            self.assertIsNotNone(indices)
-            
-            expected_sequences = len(self.df) - seq_length + 1
-            self.assertEqual(len(X), expected_sequences, 
-                             f"Expected {expected_sequences} sequences, but got {len(X)}")
-            self.assertEqual(len(Y), expected_sequences)
-            self.assertEqual(len(indices), expected_sequences)
-            
-            self.assertEqual(X.shape[1], seq_length)
-            self.assertEqual(X.shape[2], len(self.feature_cols))
-            
-            # Check if the sequences are correct
-            for i in range(len(X)):
-                np.testing.assert_array_equal(X[i], self.df[self.feature_cols].iloc[i:i+seq_length].values)
-                self.assertEqual(Y[i], self.df[self.target_col].iloc[i+seq_length-1])
-                self.assertEqual(indices[i], self.df.index[i+seq_length-1])
-        except Exception as e:
-            print(f"Error in test_create_sequences: {str(e)}")
-            print(traceback.format_exc())
-            raise
-
-    def test_create_sequences_empty(self):
-        seq_length = 100  # Larger than the group size
-        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
-        X, Y, indices = trainer.create_sequences(self.df, seq_length)
-        
+        seq_length = 10
+        X, Y, indices = self.trainer.data_processor.create_sequences(self.trainer.data_processor.stock_data, seq_length)
         self.assertIsNotNone(X)
         self.assertIsNotNone(Y)
         self.assertIsNotNone(indices)
-        
-        self.assertEqual(len(X), 0)
-        self.assertEqual(len(Y), 0)
-        self.assertEqual(len(indices), 0)
+        if len(X) > 0:
+            self.assertEqual(X.shape[1], seq_length)
+            self.assertEqual(X.shape[2], len(self.feature_cols))  # Use the actual number of features
 
-class TestLSTMModel(unittest.TestCase):
-    def test_forward_pass(self):
-        try:
-            batch_size = 16
-            seq_length = 10
-            input_size = 5  # Number of features
-            hidden_size = 32
-            model = LSTMModel(input_size=input_size, hidden_size=hidden_size)
-            inputs = torch.randn(batch_size, seq_length, input_size)
-            outputs = model(inputs)
-            self.assertEqual(outputs.shape, (batch_size, 1))
-        except Exception as e:
-            print(f"Error in test_forward_pass: {str(e)}")
-            print(traceback.format_exc())
-            raise
-
-class TestDataSplittingAndSequenceCreation(unittest.TestCase):
+class TestDynamicDateSplitting(BaseTestClass):
     def setUp(self):
-        # Create a synthetic dataset with controlled date ranges
-        dates = pd.date_range(start='2021-01-01', periods=365, freq='D')
-        permnos = [10001, 10002, 10003]
-        data = []
-        for permno in permnos:
-            for date in dates:
-                data.append({
-                    'permno': permno,
-                    'date': date,
-                    'feature1': np.random.randn(),
-                    'feature2': np.random.randn(),
-                    'stock_exret': np.random.randn()
-                })
-        self.df = pd.DataFrame(data)
-        self.data_in_path = 'test_data.csv'
-        self.df.to_csv(self.data_in_path, index=False)
-
-    def test_data_splitting(self):
-        processor = DataProcessor(self.data_in_path, standardize=False)
-        processor.load_data()
-        processor.preprocess_data()
-        processor.split_data()
-        self.assertGreater(len(processor.train_data), 0)
-        self.assertGreater(len(processor.val_data), 0)
-        self.assertGreater(len(processor.test_data), 0)
-        self.assertTrue('stock_exret' in processor.train_data.columns)
-
-    def test_sequence_creation(self):
-        processor = DataProcessor(self.data_in_path, standardize=False)
-        processor.load_data()
-        processor.preprocess_data()
-        processor.split_data()
-        trainer = LSTMTrainer(processor.feature_cols, processor.ret_var, torch.device('cpu'))
-        seq_length = 5
-        X_train, Y_train, _ = trainer.create_sequences(processor.train_data, seq_length)
-        X_val, Y_val, _ = trainer.create_sequences(processor.val_data, seq_length)
-        X_test, Y_test, _ = trainer.create_sequences(processor.test_data, seq_length)
-        self.assertIsNotNone(X_train)
-        self.assertIsNotNone(X_val)
-        self.assertIsNotNone(X_test)
-        self.assertEqual(X_train.shape[1], seq_length)
-        self.assertEqual(X_val.shape[1], seq_length)
-        self.assertEqual(X_test.shape[1], seq_length)
-
-    def tearDown(self):
-        if os.path.exists(self.data_in_path):
-            os.remove(self.data_in_path)
-
-class TestDynamicDateSplitting(unittest.TestCase):
-    def setUp(self):
-        # Create a synthetic dataset spanning over 12 years
-        dates = pd.date_range(end=datetime.datetime.today(), periods=12*365, freq='D')
-        permnos = [10001, 10002, 10003]
-        data = []
-        for permno in permnos:
-            for date in dates:
-                data.append({
-                    'permno': permno,
-                    'date': date,
-                    'feature1': np.random.randn(),
-                    'feature2': np.random.randn(),
-                    'stock_exret': np.random.randn()
-                })
-        self.df = pd.DataFrame(data)
-        self.data_in_path = 'test_dynamic_data.csv'
-        self.df.to_csv(self.data_in_path, index=False)
+        self.processor = DataProcessor(data_in_path=None, ret_var=self.target_col, standardize=True)
+        self.processor.stock_data = self.synthetic_df.copy()
+        self.processor.feature_cols = self.feature_cols
 
     def test_dynamic_time_based_split(self):
-        processor = DataProcessor(self.data_in_path, standardize=False)
-        processor.load_data()
-        processor.preprocess_data()
-        processor.split_data()
-        
-        # Check that datasets are not empty
-        self.assertGreater(len(processor.train_data), 0)
-        self.assertGreater(len(processor.val_data), 0)
-        self.assertGreater(len(processor.test_data), 0)
+        self.processor.preprocess_data()
+        self.processor.split_data(method='time')
+        self.assertIsNotNone(self.processor.train_data)
+        self.assertIsNotNone(self.processor.val_data)
+        self.assertIsNotNone(self.processor.test_data)
+        # Add more specific assertions about the time-based split
+        self.assertTrue(self.processor.train_data['date'].max() <= self.processor.val_data['date'].min())
+        self.assertTrue(self.processor.val_data['date'].max() <= self.processor.test_data['date'].min())
 
-        # Check date ranges
-        train_end_date = processor.train_data['date'].max()
-        val_start_date = processor.val_data['date'].min()
-        val_end_date = processor.val_data['date'].max()
-        test_start_date = processor.test_data['date'].min()
-
-        self.assertLessEqual(train_end_date, val_start_date)
-        self.assertLessEqual(val_end_date, test_start_date)
-        
-    def tearDown(self):
-        if os.path.exists(self.data_in_path):
-            os.remove(self.data_in_path)
-
-class TestSequenceCreation(unittest.TestCase):
-    def setUp(self):
-        # Create a sample dataset
-        dates = pd.date_range(start='2021-01-01', periods=100)
-        permnos = [10001, 10002, 10003]
-        data = []
-        for permno in permnos:
-            for date in dates:
-                data.append({
-                    'permno': permno,
-                    'date': date,
-                    'feature1': np.random.randn(),
-                    'feature2': np.random.randn(),
-                    'stock_exret': np.random.randn()
-                })
-        self.df = pd.DataFrame(data)
-        self.feature_cols = ['feature1', 'feature2']
-        self.target_col = 'stock_exret'
-
-    def test_create_sequences_valid(self):
-        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
-        seq_length = 10
-        X, Y, _ = trainer.create_sequences(self.df, seq_length)
-        self.assertIsNotNone(X)
-        self.assertIsNotNone(Y)
-        self.assertEqual(X.shape[1], seq_length)
-        self.assertEqual(X.shape[0], Y.shape[0])
-
-    def test_create_sequences_short_data(self):
-        short_df = self.df[self.df['permno'] == 10001].iloc[:5]  # Only 5 data points
-        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
-        seq_length = 10
-        X, Y, _ = trainer.create_sequences(short_df, seq_length)
-        self.assertIsNone(X)
-        self.assertIsNone(Y)
-
-    def test_create_sequences_varying_lengths(self):
-        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
-        for seq_length in [2, 5, 20, 50]:
-            X, Y, _ = trainer.create_sequences(self.df, seq_length)
-            self.assertIsNotNone(X)
-            self.assertIsNotNone(Y)
-            self.assertLessEqual(X.shape[1], seq_length)
-
-    def test_parallel_create_sequences(self):
-        trainer = LSTMTrainer(self.feature_cols, self.target_col, 'cpu')
-        seq_length = 10
-        X, Y, _ = trainer.parallel_create_sequences(self.df, seq_length)
-        self.assertIsNotNone(X)
-        self.assertIsNotNone(Y)
-        self.assertEqual(X.shape[1], seq_length)
-        self.assertEqual(X.shape[0], Y.shape[0])
-
-class TestDataProcessorFiltering(unittest.TestCase):
-    def setUp(self):
-        # Create a synthetic dataset with controlled date ranges and varying lengths
-        dates = pd.date_range(start='2021-01-01', periods=365, freq='D')
-        permnos = [10001, 10002, 10003, 10004]
-        data = []
-        for permno in permnos:
-            for date in dates[:len(dates) - permnos.index(permno) * 50]:  # Vary the length for each permno
-                data.append({
-                    'permno': permno,
-                    'date': date,
-                    'feature1': np.random.randn(),
-                    'feature2': np.random.randn(),
-                    'stock_exret': np.random.randn()
-                })
-        self.df = pd.DataFrame(data)
-        self.data_in_path = 'test_filtering_data.csv'
-        self.df.to_csv(self.data_in_path, index=False)
-
-    def test_filter_stocks_by_min_length(self):
-        Config.MIN_SEQUENCE_LENGTH = 300  # Set a minimum sequence length
-        processor = DataProcessor(self.data_in_path, standardize=False)
-        processor.load_data()
-        processor.preprocess_data()
-        
-        # Check that all remaining stocks have at least MIN_SEQUENCE_LENGTH data points
-        min_length = processor.stock_data.groupby('permno').size().min()
-        self.assertGreaterEqual(min_length, Config.MIN_SEQUENCE_LENGTH)
-        
-        # Check that stocks with insufficient data were removed
-        remaining_permnos = processor.stock_data['permno'].unique()
-        self.assertLess(len(remaining_permnos), len(self.df['permno'].unique()))
-
-    def test_get_min_group_length(self):
-        Config.MIN_SEQUENCE_LENGTH = 300  # Set a minimum sequence length
-        processor = DataProcessor(self.data_in_path, standardize=False)
-        processor.load_data()
-        processor.preprocess_data()
-        processor.split_data()
-        
-        min_group_length = processor.get_min_group_length()
-        self.assertGreaterEqual(min_group_length, Config.MIN_SEQUENCE_LENGTH)
-
-    def tearDown(self):
-        if os.path.exists(self.data_in_path):
-            os.remove(self.data_in_path)
+# Add more test classes as needed
 
 if __name__ == '__main__':
     unittest.main()

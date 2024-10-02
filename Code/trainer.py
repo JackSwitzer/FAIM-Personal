@@ -21,7 +21,7 @@ import optuna
 from tqdm import tqdm
 
 from models import LSTMModel
-from data_processor import SequenceDataset
+from data_processor import SequenceDataset, DataProcessor
 from utils import *
 from config import Config
 
@@ -44,17 +44,38 @@ class LSTMTrainer:
         self.best_hyperparams = None
         os.makedirs(self.out_dir, exist_ok=True)
         os.makedirs(self.model_weights_dir, exist_ok=True)
+        self.data_processor = DataProcessor(data_in_path=None, ret_var=target_col, standardize=config.STANDARDIZE)
+        self.data_processor.feature_cols = feature_cols
 
     def _create_dataloader(self, data, seq_length, batch_size, num_workers=Config.NUM_WORKERS):
         dataset = SequenceDataset(data, seq_length, self.feature_cols, self.target_col)
         if self.use_distributed:
             sampler = DistributedSampler(dataset, num_replicas=self.world_size, rank=self.rank)
-            return DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True)
+            return DataLoader(
+                dataset,
+                batch_size=batch_size,
+                sampler=sampler,
+                num_workers=num_workers,
+                pin_memory=True,
+                prefetch_factor=2,
+                persistent_workers=True
+            )
         else:
-            return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+            return DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True,
+                prefetch_factor=2,
+                persistent_workers=True
+            )
 
     def train_model(self, train_loader, val_loader, test_loader, hyperparams, trial=None):
         try:
+            # Initialize epoch to a default value
+            epoch = 0
+
             # Initialize model
             input_size = len(self.feature_cols)
             model = LSTMModel(input_size=input_size, **hyperparams).to(self.device)
@@ -68,9 +89,12 @@ class LSTMTrainer:
             criterion = nn.MSELoss()
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                factor=hyperparams.get('scheduler_factor', 0.5),
+                factor=hyperparams.get('scheduler_factor', 0.1),
                 patience=hyperparams.get('scheduler_patience', 5)
             )
+
+            # Initialize GradScaler for mixed-precision training
+            scaler = GradScaler()
 
             # Load checkpoint if available
             start_epoch, best_val_loss = self.load_checkpoint(model, optimizer, scheduler)
@@ -83,7 +107,6 @@ class LSTMTrainer:
             total_train_time = 0
 
             num_batches = len(train_loader)
-            scaler = GradScaler()
 
             for epoch in range(start_epoch, num_epochs):
                 epoch_start_time = time.time()
@@ -94,10 +117,11 @@ class LSTMTrainer:
                     train_loader,
                     criterion,
                     optimizer,
+                    scaler,
+                    scheduler,  # Pass the scheduler to _train_epoch
                     clip_grad_norm=self.config.CLIP_GRAD_NORM,
                     accumulation_steps=self.config.ACCUMULATION_STEPS,
-                    epoch=epoch,
-                    scaler=scaler
+                    epoch=epoch
                 )
                 train_losses.append(train_loss)
 
@@ -109,9 +133,6 @@ class LSTMTrainer:
                 if test_loader is not None:
                     test_loss = self._evaluate(model, test_loader, criterion)
                     test_losses.append(test_loss)
-
-                # Scheduler step
-                scheduler.step(val_loss)
 
                 # Save checkpoint
                 state = {
@@ -181,12 +202,9 @@ class LSTMTrainer:
             if trial is None:
                 self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
 
-    def _train_epoch(self, model, dataloader, criterion, optimizer, clip_grad_norm=None, accumulation_steps=1, epoch=0):
-        """Train the model for one epoch with gradient accumulation."""
+    def _train_epoch(self, model, dataloader, criterion, optimizer, scaler, scheduler, clip_grad_norm=None, accumulation_steps=1, epoch=0):
         model.train()
         total_loss = 0.0
-        scaler = GradScaler()
-        optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
             batch_X = batch_X.to(self.device, non_blocking=True)
@@ -198,36 +216,17 @@ class LSTMTrainer:
 
             scaler.scale(loss).backward()
 
-            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
-                if clip_grad_norm:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-
+            if (batch_idx + 1) % accumulation_steps == 0:
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-            total_loss += loss.detach().item() * accumulation_steps * batch_Y.size(0)
+            total_loss += loss.item() * accumulation_steps
 
-            # Save checkpoint every N batches
-            if (batch_idx + 1) % self.config.CHECKPOINT_INTERVAL == 0:
-                state = {
-                    'epoch': epoch,
-                    'batch_idx': batch_idx,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': self.scheduler.state_dict(),
-                    'best_val_loss': self.best_val_loss,
-                    'hyperparams': self.hyperparams
-                }
-                self.save_checkpoint(state, is_best=False, filename=f'checkpoint_epoch_{epoch}_batch_{batch_idx + 1}.pth.tar')
+        # Update the scheduler
+        scheduler.step(total_loss / len(dataloader))
 
-            # Clear cache and delete unnecessary variables
-            del batch_X, batch_Y, outputs, loss
-            torch.cuda.empty_cache()
-
-        avg_loss = total_loss / len(dataloader.dataset)
-        return avg_loss
+        return total_loss / len(dataloader)
 
     def _evaluate(self, model, dataloader, criterion, return_predictions=False):
         model.eval()
@@ -488,10 +487,13 @@ class LSTMTrainer:
         """
         Adjust the sequence length based on the minimum group length.
         """
-        # Ensure that seq_length is at least MIN_SEQUENCE_LENGTH and not greater than min_group_length
-        self.seq_length = min(Config.LSTM_PARAMS['seq_length'], min_group_length)
-        self.seq_length = max(self.seq_length, Config.MIN_SEQUENCE_LENGTH)
-        if self.seq_length < Config.MIN_SEQUENCE_LENGTH:
-            self.logger.warning(f"Adjusted sequence length {self.seq_length} is less than MIN_SEQUENCE_LENGTH {Config.MIN_SEQUENCE_LENGTH}.")
-        else:
-            self.logger.info(f"Sequence length set to: {self.seq_length}")
+        self.seq_length = min(self.config.LSTM_PARAMS['seq_length'], min_group_length)
+        self.seq_length = max(self.seq_length, self.config.MIN_SEQUENCE_LENGTH)
+        self.logger.info(f"Sequence length set to: {self.seq_length}")
+
+        # Update DataProcessor's seq_length if needed
+        self.config.SEQ_LENGTH = self.seq_length  # Ensure consistency
+
+        # If DataProcessor instance is accessible
+        if hasattr(self, 'data_processor'):
+            self.data_processor.seq_length = self.seq_length

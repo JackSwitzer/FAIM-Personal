@@ -22,13 +22,13 @@ class Config:
     MIN_SEQUENCE_LENGTH = 5
 
     # Training settings
-    NUM_EPOCHS = 1000
-    BATCH_SIZE = 512
+    NUM_EPOCHS = 100  # Increase epochs for full training
+    BATCH_SIZE = 1024  # Increase batch size to utilize GPU memory
     LEARNING_RATE = 0.001
     ACCUMULATION_STEPS = 1 # Up 
     CLIP_GRAD_NORM = 1.0
     USE_ALL_DATA = True
-    NUM_WORKERS = 2  # CHANGE TO 4 or 8 WHEN TESTING
+    NUM_WORKERS = 4  # Adjust based on your CPU cores
     CHECKPOINT_INTERVAL = 100
 
     # LSTM hyperparameters 
@@ -45,7 +45,7 @@ class Config:
         'learning_rate': 0.001,
         'weight_decay': 1e-6,
         'seq_length': 10,
-        'batch_size': 128,
+        'batch_size': BATCH_SIZE,
         'use_scheduler': True,
         'scheduler_factor': 0.5,
         'scheduler_patience': 5
@@ -57,6 +57,9 @@ class Config:
 
     # Logging settings
     LOG_INTERVAL = 5  # Log every 5 epochs
+
+    # New option to use permco instead of permno
+    USE_PERMCO = False  # Set this to True if you want to use permco instead of permno
 
     @classmethod
     def update(cls, **kwargs):

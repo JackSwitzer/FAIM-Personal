@@ -91,19 +91,31 @@ def main_worker(rank, world_size, config, use_distributed):
     setup_logging(config.OUT_DIR, f"train_log_rank_{rank}.log")
 
     # Set device for this process
-    if use_distributed:
-        torch.cuda.set_device(rank)
-        device = torch.device(f'cuda:{rank}')
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{rank}")
+        torch.cuda.set_device(device)
     else:
-        device = check_device()
+        device = torch.device("cpu")
+    
+    logger = get_logger('stock_predictor')
+    logger.info(f"Using device: {device}")
 
-    # Initialize DataProcessor
-    data_processor = DataProcessor(config.FULL_DATA_PATH, ret_var=config.TARGET_VARIABLE)
+    # Initialize DataProcessor with the option to use permco
+    data_processor = DataProcessor(
+        config.FULL_DATA_PATH,
+        ret_var=config.TARGET_VARIABLE,
+        use_permco=config.USE_PERMCO  # Add this option to your Config class
+    )
     data_processor.load_data()
-    data_processor.preprocess_and_split_data()
+    data_processor.preprocess_data()
+    data_processor.split_data()
+    data_processor.filter_stocks_by_min_length_in_splits()
 
-    # Adjust sequence length based on the minimum group length
-    min_group_length = data_processor.min_group_length
+    # Ensure seq_length is adjusted based on min_group_length
+    min_group_length = data_processor.get_min_group_length()
+    seq_length = min(config.LSTM_PARAMS.get('seq_length', 10), min_group_length)
+
+    # Initialize trainer with updated feature columns and input size
     trainer = LSTMTrainer(
         feature_cols=data_processor.feature_cols,
         target_col=data_processor.ret_var,
