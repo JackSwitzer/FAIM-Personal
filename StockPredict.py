@@ -86,83 +86,57 @@ def main_Regression(rank, world_size):
         logger.info("Regression run completed.")
 
 def main_worker(rank, world_size, config, use_distributed):
-    setup(rank, world_size, use_distributed=use_distributed)
-    set_seed(config.SEED + rank)  # Ensure different seeds for each process
-    setup_logging(config.OUT_DIR, f"train_log_rank_{rank}.log")
-
-    # Set device for this process
-    if torch.cuda.is_available():
-        device = torch.device(f"cuda:{rank}")
-        torch.cuda.set_device(device)
-    else:
-        device = torch.device("cpu")
-    
-    logger = get_logger('stock_predictor')
-    logger.info(f"Using device: {device}")
+    setup(rank, world_size)
+    out_dir = config.OUT_DIR
+    setup_logging(out_dir)
+    logger = logging.getLogger(__name__)  # Use module-level logger
+    set_seed()
 
     try:
-        # Initialize DataProcessor with the option to use permco and pass config
-        data_processor = DataProcessor(
-            data_in_path=config.FULL_DATA_PATH,
-            ret_var=config.TARGET_VARIABLE,
+        data_input_dir = config.DATA_INPUT_DIR
+        full_data_path = config.FULL_DATA_PATH
+        target_variable = config.TARGET_VARIABLE  # Change this if needed
+        logger.info(f"Target variable set to: {target_variable}")
+
+        # Load and preprocess data
+        processor = DataProcessor(
+            data_in_path=full_data_path,
+            ret_var=target_variable,
             standardize=config.STANDARDIZE,
-            config=config  # Pass the config object
+            seq_length=config.LSTM_PARAMS.get('seq_length', 10),
+            config=config
         )
-        data_processor.load_data()
-        data_processor.preprocess_data()
-        data_processor.split_data()  # The split_data method now uses the TEST_DATA_PERIOD_MONTHS from config
-        data_processor.filter_stocks_by_min_length_in_splits()
+        processor.load_data()
+        processor.preprocess_and_split_data()
 
-        # Ensure seq_length is adjusted based on min_group_length
-        min_group_length = data_processor.get_min_group_length()
-        seq_length = min(config.LSTM_PARAMS.get('seq_length', 10), min_group_length)
+        # Create datasets
+        train_dataset = processor.train_data
+        val_dataset = processor.val_data
+        test_dataset = processor.test_data
 
-        if min_group_length < config.MIN_SEQUENCE_LENGTH:
-            logger.warning(f"Minimum group length ({min_group_length}) is less than MIN_SEQUENCE_LENGTH ({config.MIN_SEQUENCE_LENGTH}). Adjusting MIN_SEQUENCE_LENGTH.")
-            config.MIN_SEQUENCE_LENGTH = min_group_length
-
-        # Initialize trainer with updated feature columns and input size
+        # Initialize trainer
         trainer = LSTMTrainer(
-            feature_cols=data_processor.feature_cols,
-            target_col=data_processor.ret_var,
-            device=device,
+            feature_cols=processor.feature_cols,
+            target_col=target_variable,
+            device=config.DEVICE,
             config=config,
             rank=rank,
             world_size=world_size,
             use_distributed=use_distributed
         )
-        trainer.adjust_sequence_length(min_group_length)
 
-        # Now pass datasets to optimize_hyperparameters
-        train_dataset = data_processor.train_data
-        val_dataset = data_processor.val_data
-        test_dataset = data_processor.test_data
-
-        # Check if training data is available
-        if train_dataset is None or train_dataset.empty:
-            logger.error("Training dataset is empty. Cannot proceed with training.")
-            return
-
-        # Load or optimize hyperparameters
-        hyperparams = trainer.load_hyperparams(is_best=True)
-        if hyperparams is None:
-            hyperparams, _ = trainer.optimize_hyperparameters(
-                train_dataset, val_dataset, test_dataset, n_trials=config.N_TRIALS
-            )
+        # Optimize hyperparameters
+        hyperparams, _ = trainer.optimize_hyperparameters(train_dataset, val_dataset, test_dataset, n_trials=config.N_TRIALS)
 
         # Create data loaders with optimized hyperparameters
-        try:
-            seq_length = hyperparams['seq_length']
-            batch_size = hyperparams['batch_size']
-            train_loader = trainer._create_dataloader(train_dataset, seq_length, batch_size)
-            val_loader = trainer._create_dataloader(val_dataset, seq_length, batch_size) if val_dataset is not None and not val_dataset.empty else None
-            test_loader = trainer._create_dataloader(test_dataset, seq_length, batch_size) if test_dataset is not None and not test_dataset.empty else None
-        except ValueError as e:
-            logger.error(f"Error creating data loaders: {str(e)}")
-            logger.error("Terminating the program due to data loading error.")
-            sys.exit(1)
+        seq_length = hyperparams['seq_length']
+        batch_size = hyperparams['batch_size']
+        train_loader = trainer._create_dataloader(train_dataset, seq_length, batch_size)
+        val_loader = trainer._create_dataloader(val_dataset, seq_length, batch_size) if val_dataset is not None and not val_dataset.empty else None
+        test_loader = trainer._create_dataloader(test_dataset, seq_length, batch_size) if test_dataset is not None and not test_dataset.empty else None
 
-        # Train the model
+        # Perform a full training run with the best hyperparameters
+        logger.info("Starting full training run with the best hyperparameters.")
         model, training_history = trainer.train_model(train_loader, val_loader, test_loader, hyperparams)
 
     except Exception as e:

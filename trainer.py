@@ -198,7 +198,6 @@ class LSTMTrainer:
                         'optimizer_state_dict': optimizer.state_dict(),
                         'scheduler_state_dict': scheduler.state_dict(),
                         'best_val_loss': best_val_loss,
-                        'hyperparams': hyperparams
                     })
 
                 # Report to Optuna and check for pruning
@@ -290,9 +289,7 @@ class LSTMTrainer:
             return avg_loss
 
     def save_checkpoint(self, state, filename='checkpoint.pth.tar'):
-        """
-        Save a checkpoint of the model.
-        """
+        """Save a checkpoint of the training state."""
         if self.rank == 0:
             save_path = os.path.join(self.model_weights_dir, filename)
             torch.save(state, save_path)
@@ -308,64 +305,24 @@ class LSTMTrainer:
             json.dump(metrics, f)
         self.logger.info("Training metrics saved.")
 
-    def _save_interrupted_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
-        """Save the current state when training is interrupted."""
-        try:
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
-                'best_val_loss': best_val_loss,
-                'hyperparams': hyperparams
-            }
-            checkpoint_path = os.path.join(self.model_weights_dir, 'interrupted_checkpoint.pth')
-            torch.save(checkpoint, checkpoint_path)
-            self.logger.info(f"Interrupted state saved at epoch {epoch}. Training can be resumed later.")
-        except Exception as e:
-            self.logger.error(f"Failed to save interrupted state: {str(e)}")
-
-    def _save_final_state(self, epoch, model, optimizer, scheduler, best_val_loss, hyperparams):
-        """Save the final state of training."""
-        try:
-            # Convert numpy.int64 to int
-            def convert_to_native(obj):
-                if isinstance(obj, np.integer):
-                    return int(obj)
-                elif isinstance(obj, np.floating):
-                    return float(obj)
-                elif isinstance(obj, np.ndarray):
-                    return obj.tolist()
-                elif isinstance(obj, dict):
-                    return {k: convert_to_native(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_to_native(i) for i in obj]
-                else:
-                    return obj
-
+    def save_final_state(self, model, epoch, best_val_loss):
+        """Save the final model state and hyperparameters."""
+        if self.rank == 0:
             # Save the final model state
             final_model_path = os.path.join(self.model_weights_dir, 'final_model.pth')
             torch.save(model.state_dict(), final_model_path)
             self.logger.info(f"Final model state saved to {final_model_path}")
 
             # Save the final checkpoint
-            final_checkpoint = {
-                'epoch': epoch,
+            self.save_checkpoint({
+                'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
                 'best_val_loss': best_val_loss,
-                'hyperparams': convert_to_native(hyperparams)
-            }
-            final_checkpoint_path = os.path.join(self.model_weights_dir, 'final_checkpoint.pth')
-            torch.save(final_checkpoint, final_checkpoint_path)
-            self.logger.info(f"Final checkpoint saved to {final_checkpoint_path}")
+            }, filename='final_checkpoint.pth')
 
             # Save the hyperparameters
-            self.save_hyperparams(hyperparams, is_best=False)
+            self.save_hyperparams(self.best_hyperparams)
             self.logger.info("Final hyperparameters saved.")
-        except Exception as e:
-            self.logger.error(f"Failed to save final state: {str(e)}")
 
     def optimize_hyperparameters(self, train_dataset, val_dataset, test_dataset, n_trials=Config.N_TRIALS):
         """
@@ -373,62 +330,41 @@ class LSTMTrainer:
         """
         def objective(trial):
             hyperparams = {
-                'seq_length': trial.suggest_int('seq_length', max(self.config.MIN_SEQUENCE_LENGTH, 5), 12),
-                'batch_size': trial.suggest_categorical('batch_size', [64, 128, 256, 512, 1024]),
-                'learning_rate': trial.suggest_float('learning_rate', 0.0001, 0.01, log=True),
-                'num_epochs': self.config.HYPEROPT_EPOCHS,
-                'hidden_size': trial.suggest_categorical('hidden_size', [64, 128, 256]),
+                'hidden_size': trial.suggest_int('hidden_size', 64, 512),  # Increased upper limit
                 'num_layers': trial.suggest_int('num_layers', 1, 4),
-                'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.3),
-                'bidirectional': trial.suggest_categorical('bidirectional', [False]),
-                'use_batch_norm': trial.suggest_categorical('use_batch_norm', [True]),
-                'activation_function': trial.suggest_categorical('activation_function', ['ReLU', 'LeakyReLU', 'ELU']),
-                'fc1_size': trial.suggest_categorical('fc1_size', [16, 32, 64, 128]),
-                'fc2_size': trial.suggest_categorical('fc2_size', [16, 32, 64, 128]),
-                'weight_decay': trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True),
-                'scheduler_factor': trial.suggest_float('scheduler_factor', 0.1, 0.9),
-                'scheduler_patience': trial.suggest_int('scheduler_patience', 2, 10)
+                'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5),
+                'learning_rate': trial.suggest_loguniform('learning_rate', 1e-5, 1e-2),
+                'weight_decay': trial.suggest_loguniform('weight_decay', 1e-6, 1e-3),
+                'seq_length': trial.suggest_int('seq_length', 5, 30),  # Increased upper limit
+                'batch_size': Config.BATCH_SIZE 
             }
 
             # Create data loaders with trial's hyperparameters
-            seq_length = hyperparams['seq_length']
-            batch_size = hyperparams['batch_size']
+            train_loader = self._create_dataloader(train_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
+            val_loader = self._create_dataloader(val_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
+            test_loader = self._create_dataloader(test_dataset, hyperparams['seq_length'], hyperparams['batch_size'])
 
-            train_loader = self._create_dataloader(train_dataset, seq_length, batch_size)
-            val_loader = self._create_dataloader(val_dataset, seq_length, batch_size)
-            test_loader = self._create_dataloader(test_dataset, seq_length, batch_size)
+            # Train the model with the current hyperparameters
+            model, _ = self.train_model(train_loader, val_loader, test_loader, hyperparams, trial)
+            val_loss = self.evaluate_validation_loss(model, val_loader, hyperparams)
+            return val_loss
 
-            # Initialize model with trial hyperparameters
-            model = LSTMModel(input_size=self.input_size, **hyperparams).to(self.device)
-            optimizer = optim.Adam(model.parameters(), lr=hyperparams['learning_rate'], weight_decay=hyperparams['weight_decay'])
-
-            # Train the model with pruning
-            try:
-                model, training_history = self.train_model(
-                    train_loader, val_loader, test_loader, hyperparams, trial=trial
-                )
-                last_val_loss = training_history['val_losses'][-1]
-                return last_val_loss
-            except optuna.exceptions.TrialPruned:
-                raise
-            except Exception as e:
-                self.logger.error(f"An error occurred during trial: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                raise
-
-        # Run the study
-        study = optuna.create_study(direction='minimize', pruner=optuna.pruners.MedianPruner())
-        self.logger.info(f"Starting hyperparameter optimization with {n_trials} trials...")
+        study = optuna.create_study(direction='minimize')
         study.optimize(objective, n_trials=n_trials)
-        self.logger.info("Hyperparameter optimization completed.")
 
-        # Store and return best hyperparameters
+        # Get the best hyperparameters
         best_hyperparams = study.best_params
-        self.save_hyperparams(best_hyperparams, is_best=True)
         self.logger.info(f"Best hyperparameters: {best_hyperparams}")
-        self.logger.info(f"Best validation loss: {study.best_value}")
 
-        return best_hyperparams, study.best_value
+        # Save the best hyperparameters
+        self.save_hyperparams('best_hyperparams', best_hyperparams, is_best=True)
+
+        return best_hyperparams, study.best_trial
+
+    def evaluate_validation_loss(self, model, val_loader, hyperparams):
+        """Evaluate the model on the validation set and return the loss."""
+        val_loss, _, _ = self._evaluate(model, val_loader, nn.MSELoss())
+        return val_loss
 
     def load_hyperparams(self, is_best=True):
         # Adjust method to load hyperparameters for the single target variable
