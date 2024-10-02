@@ -27,7 +27,7 @@ class Config:
     # Training settings
     NUM_EPOCHS = 1000  # Full training run epochs
     BATCH_SIZE = 512  # Batch size
-    ACCUMULATION_STEPS = 1  # Gradient accumulation steps
+    ACCUMULATION_STEPS = 2  # Gradient accumulation steps
     CLIP_GRAD_NORM = 1.0
     USE_ALL_DATA = True
     NUM_WORKERS = 6

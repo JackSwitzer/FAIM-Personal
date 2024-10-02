@@ -157,17 +157,12 @@ class LSTMTrainer:
                 # Update best model if validation loss has improved
                 if val_loss is not None and val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    self.save_checkpoint({
-                        'epoch': epoch + 1,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'best_val_loss': best_val_loss,
-                        'hyperparams': hyperparams
-                    }, is_best=True)
-                    self.save_hyperparams(hyperparams, is_best=True)  # Save hyperparameters when a new best model is found
+                    # Save the best model's state dict (but not the optimizer/scheduler state)
+                    self.save_best_model(model.state_dict())
+                    # Save hyperparameters when a new best model is found, if necessary
+                    self.save_hyperparams(hyperparams, is_best=True)
 
-                # Log progress
+                # Log progress and save checkpoints at LOG_INTERVAL epochs
                 if (epoch + 1) % self.config.LOG_INTERVAL == 0 or epoch == num_epochs - 1:
                     current_time = time.time()
                     time_since_last_log = current_time - last_log_time
@@ -175,8 +170,15 @@ class LSTMTrainer:
 
                     self.logger.info(f"Epoch {epoch + 1}/{num_epochs} completed")
                     self.logger.info(f"Time since last log: {time_since_last_log:.2f} seconds")
-                    avg_epoch_time = total_train_time / ((epoch - start_epoch + 1) // self.config.LOG_INTERVAL)
-                    self.logger.info(f"Average time per {self.config.LOG_INTERVAL} epochs: {avg_epoch_time:.2f} seconds")
+                    
+                    # Safeguard against division by zero
+                    epochs_since_start = epoch - start_epoch + 1
+                    if epochs_since_start > 0:
+                        avg_epoch_time = total_train_time / epochs_since_start
+                        self.logger.info(f"Average time per epoch: {avg_epoch_time:.2f} seconds")
+                    else:
+                        self.logger.warning("Not enough epochs completed to calculate average time.")
+
                     self.logger.info(f"Train Loss: {train_loss:.4f}")
                     if val_loss is not None:
                         self.logger.info(f"Validation Loss: {val_loss:.4f}")
@@ -189,14 +191,21 @@ class LSTMTrainer:
 
                     last_log_time = current_time
 
+                    # Save checkpoint
+                    self.save_checkpoint({
+                        'epoch': epoch + 1,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'best_val_loss': best_val_loss,
+                        'hyperparams': hyperparams
+                    })
+
                 # Report to Optuna and check for pruning
                 if trial is not None:
                     trial.report(val_loss, epoch)
                     if trial.should_prune():
                         raise optuna.exceptions.TrialPruned()
-
-            # Save final state
-            self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
 
             training_history = {
                 'train_losses': train_losses,
@@ -206,39 +215,48 @@ class LSTMTrainer:
 
             return model, training_history
 
-        except KeyboardInterrupt:
-            self.logger.warning("Training interrupted by user.")
-            self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
-            raise
         except Exception as e:
             self.logger.error(f"An error occurred during training: {str(e)}")
             self.logger.error(traceback.format_exc())
-            self._save_interrupted_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
-            raise
+            # Save the current state before exiting
+            self.save_checkpoint({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'best_val_loss': best_val_loss,
+            }, filename='interrupted_checkpoint.pth.tar')
+            self.logger.info(f"Interrupted state saved at epoch {epoch}. Training can be resumed later.")
 
         finally:
+            # Save final state
+            self.save_final_state(model, epoch, best_val_loss)
             self.logger.info("Model training completed.")
-            if trial is None:
-                self._save_final_state(epoch, model, optimizer, scheduler, best_val_loss, hyperparams)
+
+        return model, {'train_losses': train_losses, 'val_losses': val_losses, 'test_losses': test_losses}
 
     def _train_epoch(self, model, dataloader, criterion, optimizer, scaler, scheduler, clip_grad_norm=None, accumulation_steps=1, epoch=0):
         model.train()
+        optimizer.zero_grad()
         total_loss = 0.0
 
-        for batch_idx, (batch_X, batch_Y) in enumerate(dataloader):
-            batch_X = batch_X.to(self.device, non_blocking=True)
-            batch_Y = batch_Y.to(self.device, non_blocking=True)
+        for batch_idx, (inputs, targets) in enumerate(dataloader):
+            inputs, targets = inputs.to(self.device, non_blocking=True), targets.to(self.device, non_blocking=True)
 
             with autocast(device_type=self.device.type, dtype=torch.float16):
-                outputs = model(batch_X).squeeze(-1)
-                loss = criterion(outputs, batch_Y) / accumulation_steps
+                outputs = model(inputs)
+                loss = criterion(outputs.squeeze(), targets)
+                loss = loss / accumulation_steps
 
             scaler.scale(loss).backward()
 
-            if (batch_idx + 1) % accumulation_steps == 0:
+            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(dataloader):
+                if clip_grad_norm:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
                 scaler.step(optimizer)
                 scaler.update()
-                optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad()
 
             total_loss += loss.item() * accumulation_steps
 
@@ -271,19 +289,13 @@ class LSTMTrainer:
         else:
             return avg_loss
 
-    def save_checkpoint(self, state, is_best=False, filename='checkpoint.pth.tar'):
+    def save_checkpoint(self, state, filename='checkpoint.pth.tar'):
         """
         Save a checkpoint of the model.
         """
         if self.rank == 0:
-            # Synchronize processes
-            if self.use_distributed:
-                torch.distributed.barrier()
             save_path = os.path.join(self.model_weights_dir, filename)
             torch.save(state, save_path)
-            if is_best:
-                best_path = os.path.join(self.model_weights_dir, 'model_best.pth.tar')
-                shutil.copyfile(save_path, best_path)
             self.logger.info(f"Checkpoint saved to {save_path}")
 
     def save_training_metrics(self, train_losses, val_losses, test_losses):
@@ -386,6 +398,10 @@ class LSTMTrainer:
             val_loader = self._create_dataloader(val_dataset, seq_length, batch_size)
             test_loader = self._create_dataloader(test_dataset, seq_length, batch_size)
 
+            # Initialize model with trial hyperparameters
+            model = LSTMModel(input_size=self.input_size, **hyperparams).to(self.device)
+            optimizer = optim.Adam(model.parameters(), lr=hyperparams['learning_rate'], weight_decay=hyperparams['weight_decay'])
+
             # Train the model with pruning
             try:
                 model, training_history = self.train_model(
@@ -454,15 +470,18 @@ class LSTMTrainer:
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
 
-            # Add this block to handle mismatched model architectures
-            model_dict = model.state_dict()
-            pretrained_dict = {k: v for k, v in checkpoint['model_state_dict'].items() if k in model_dict and v.shape == model_dict[k].shape}
-            model_dict.update(pretrained_dict)
-            model.load_state_dict(model_dict)
+            model.load_state_dict(checkpoint['model_state_dict'])
 
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Before loading optimizer state, check if parameter groups match
+            if len(optimizer.state_dict()['param_groups']) == len(checkpoint['optimizer_state_dict']['param_groups']):
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            else:
+                self.logger.warning("Optimizer parameter groups do not match. Skipping optimizer state loading.")
+
+            # Similarly for scheduler
             if scheduler and 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
             epoch = checkpoint['epoch']
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             self.logger.info(f"Checkpoint loaded successfully from {checkpoint_path}")
@@ -490,3 +509,9 @@ class LSTMTrainer:
 
         # Update DataProcessor's seq_length
         self.data_processor.seq_length = self.seq_length
+
+    def save_best_model(self, model_state_dict):
+        if self.rank == 0:
+            best_model_path = os.path.join(self.model_weights_dir, 'best_model.pth')
+            torch.save(model_state_dict, best_model_path)
+            self.logger.info(f"Best model saved to {best_model_path}")

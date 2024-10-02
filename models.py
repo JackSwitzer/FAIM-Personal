@@ -200,10 +200,13 @@ class LSTMModel(nn.Module):
         self.fc1_size = kwargs.get('fc1_size', 64)
         self.fc2_size = kwargs.get('fc2_size', 32)
 
+        # Set dropout only if num_layers > 1
+        lstm_dropout = self.dropout_rate if self.num_layers > 1 else 0.0
+
         # Define the LSTM layer
         self.lstm = nn.LSTM(
             self.input_size, self.hidden_size, self.num_layers,
-            batch_first=True, dropout=self.dropout_rate,
+            batch_first=True, dropout=lstm_dropout,
             bidirectional=self.bidirectional
         )
         lstm_output_size = self.hidden_size * (2 if self.bidirectional else 1)
