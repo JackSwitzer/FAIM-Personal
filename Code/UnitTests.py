@@ -1,3 +1,23 @@
+"""
+UnitTests.py
+
+This module contains unit tests for the stock prediction project components. It includes:
+
+1. Synthetic Data Generation: Creates a realistic dataset for testing purposes.
+2. DataProcessor Tests: Validates the data preprocessing pipeline, including PCA and feature engineering.
+3. LSTMTrainer Tests: Checks the sequence creation functionality for LSTM models.
+4. Dynamic Date Splitting Tests: Ensures correct time-based splitting of financial data.
+
+Key features:
+- Uses Python's unittest framework for structured testing
+- Creates a synthetic dataset mimicking real stock market data
+- Tests critical components of the data processing pipeline
+- Validates LSTM-specific data preparation steps
+- Checks the integrity of time-based data splitting for financial time series
+
+This test suite is designed to ensure the reliability and correctness of various components in the stock prediction project, focusing on data handling, preprocessing, and model preparation steps. It helps maintain the quality and consistency of the project as it evolves.
+"""
+
 import unittest
 import torch
 import pandas as pd
@@ -19,6 +39,9 @@ from datetime import datetime, timedelta
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def create_synthetic_dataset(num_stocks=10, num_days=1000, num_features=50):
+    """
+    Generates a synthetic dataset for testing purposes.
+    """
     # Generate dates
     start_date = datetime(2020, 1, 1)
     dates = [start_date + timedelta(days=i) for i in range(num_days)]
@@ -53,17 +76,26 @@ def create_synthetic_dataset(num_stocks=10, num_days=1000, num_features=50):
 class BaseTestClass(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        """
+        Set up class-level resources for the tests.
+        """
         cls.synthetic_df = create_synthetic_dataset()
         cls.feature_cols = [f'feature{i}' for i in range(1, 51)]
         cls.target_col = 'stock_exret'
 
 class TestDataProcessor(BaseTestClass):
     def setUp(self):
+        """
+        Set up resources for each test in TestDataProcessor.
+        """
         self.processor = DataProcessor(data_in_path=None, ret_var=self.target_col, standardize=True)
         self.processor.stock_data = self.synthetic_df.copy()
         self.processor.feature_cols = self.feature_cols
 
     def test_preprocessing(self):
+        """
+        Test the preprocessing functionality of DataProcessor.
+        """
         self.processor.preprocess_data()
         self.assertIsNotNone(self.processor.stock_data)
         self.assertEqual(len(self.processor.feature_cols), 41)  # 35 PCA components + 6 cyclical features
@@ -78,6 +110,9 @@ class TestDataProcessor(BaseTestClass):
 
 class TestLSTMTrainer(BaseTestClass):
     def setUp(self):
+        """
+        Set up resources for each test in TestLSTMTrainer.
+        """
         self.config = Config
         self.device = torch.device('cpu')
         self.trainer = LSTMTrainer(
@@ -90,6 +125,9 @@ class TestLSTMTrainer(BaseTestClass):
         self.trainer.data_processor.preprocess_data()  # Ensure data is preprocessed
 
     def test_create_sequences(self):
+        """
+        Test the sequence creation functionality of LSTMTrainer.
+        """
         seq_length = 10
         X, Y, indices = self.trainer.data_processor.create_sequences(self.trainer.data_processor.stock_data, seq_length)
         self.assertIsNotNone(X)
@@ -101,11 +139,17 @@ class TestLSTMTrainer(BaseTestClass):
 
 class TestDynamicDateSplitting(BaseTestClass):
     def setUp(self):
+        """
+        Set up resources for each test in TestDynamicDateSplitting.
+        """
         self.processor = DataProcessor(data_in_path=None, ret_var=self.target_col, standardize=True)
         self.processor.stock_data = self.synthetic_df.copy()
         self.processor.feature_cols = self.feature_cols
 
     def test_dynamic_time_based_split(self):
+        """
+        Test the dynamic time-based data splitting functionality of DataProcessor.
+        """
         self.processor.preprocess_data()
         self.processor.split_data(method='time')
         self.assertIsNotNone(self.processor.train_data)
